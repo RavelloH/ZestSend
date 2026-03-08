@@ -44,8 +44,7 @@ export default function Layout({ children }) {
         {/* 在dev模式下不执行 */}
         {process.env.NODE_ENV !== 'development' && (
           <Script
-            src="https://analytics.ravelloh.top/script.js"
-            data-website-id="3bf45934-11bf-43d1-81c6-c5e418b7e6f8"
+            src="https://insight.ravelloh.com/script.js?siteId=421ced79-a0af-4305-aa51-859ae620b29e"
             strategy="afterInteractive"
           />
         )}
