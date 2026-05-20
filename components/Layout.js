@@ -77,7 +77,8 @@ export default function Layout({ children }) {
                 onClick={toggleTheme}
                 className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors text-gray-700 dark:text-gray-300"
                 aria-label={theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'}
-                data-umami-event={theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'}
+                data-insightflare-event="切换主题模式"
+                data-insightflare-event-to={theme === 'dark' ? '亮色' : '暗色'}
               >
                 {theme === 'dark' ? <FaSun size={20} /> : <FaMoon size={20} />}
               </motion.button>
@@ -90,7 +91,7 @@ export default function Layout({ children }) {
                 rel="noopener noreferrer"
                 className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors text-gray-700 dark:text-gray-300"
                 aria-label="GitHub 仓库"
-                data-umami-event="访问GitHub仓库"
+                data-insightflare-event="访问GitHub仓库"
               >
                 <FaGithub size={20} />
               </motion.a>
@@ -111,7 +112,7 @@ export default function Layout({ children }) {
                 target="_blank" 
                 rel="noopener noreferrer"
                 className="underline hover:text-indigo-600 dark:hover:text-indigo-400"
-                data-umami-event="访问GitHub链接-页脚"
+                data-insightflare-event="访问GitHub链接-页脚"
               >
                 GitHub:RavelloH/zestsend
               </a>. Made by <a 
@@ -119,7 +120,7 @@ export default function Layout({ children }) {
                 target="_blank" 
                 rel="noopener noreferrer" 
                 className="underline hover:text-indigo-600 dark:hover:text-indigo-400"
-                data-umami-event="访问开发者主页"
+                data-insightflare-event="访问开发者主页"
               >RavelloH</a>
             </p>
           </div>

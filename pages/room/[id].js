@@ -116,6 +116,11 @@ export default function Room() {
           setIsInitiator(data.isInitiator);
           addLog(`您是${data.isInitiator ? '创建者' : '加入者'}`);
           
+          // 追踪加入房间事件
+          window.insightflare?.track('加入房间', {
+            role: data.isInitiator ? 'initiator' : 'joiner',
+          });
+
           // 初始化连接
           initConnection(data.isInitiator);
           
@@ -519,6 +524,12 @@ export default function Room() {
     setConnected(true);
     setP2pConnectionActive(true);
     setDataChannelActive(true);
+
+    // 追踪连接成功事件（连接类型在确定 TURN 状态后更新，此处先上报初步值）
+    const isTurnRelayNow = connectionRef.current?.isUsingTurnRelay?.() ?? false;
+    window.insightflare?.track('连接成功', {
+      connectionType: isTurnRelayNow ? 'turn_relay' : 'direct_p2p',
+    });
     
     // 关键修复点2: 连接建立时立即主动停止轮询
     if (pollingId) {
@@ -802,6 +813,9 @@ export default function Room() {
   const handlePeerDisconnected = () => {
     addLog(`与对方的连接已断开`, 'warn');
     setConnected(false);
+
+    // 追踪连接断开事件
+    window.insightflare?.track('连接断开');
     setRemotePeerId('');
     setPeerIpInfo(null);
     setVideoStream(null);
@@ -1142,7 +1156,7 @@ export default function Room() {
               <button 
                 onClick={copyRoomLink} 
                 className="flex items-center space-x-1 px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
-                data-umami-event="复制房间链接"
+                data-insightflare-event="复制房间链接"
               >
                 {copySuccess ? <FiCheck className="mr-1" /> : <FiCopy className="mr-1" />}
                 <span>{copySuccess ? '已复制' : '复制链接'}</span>
@@ -1156,7 +1170,7 @@ export default function Room() {
                       ? 'bg-red-500 hover:bg-red-600 text-white' 
                       : 'bg-blue-500 hover:bg-blue-600 text-white'
                   }`}
-                  data-umami-event={screenSharing ? "停止屏幕共享" : "开始屏幕共享"}
+                  data-insightflare-event={screenSharing ? "停止屏幕共享" : "开始屏幕共享"}
                 >
                   <FiMonitor className="mr-1" />
                   <span>{screenSharing ? '停止共享' : '共享屏幕'}</span>
@@ -1166,7 +1180,7 @@ export default function Room() {
               <button
                 onClick={handleDisconnect}
                 className="flex items-center space-x-1 px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-red-500 hover:bg-red-600 text-white transition-colors"
-                data-umami-event={connected ? "断开连接" : "退出房间"}
+                data-insightflare-event={connected ? "断开连接" : "退出房间"}
               >
                 <FiX className="mr-1" />
                 <span>{connected ? '断开连接' : '退出房间'}</span>

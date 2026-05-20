@@ -1115,7 +1115,7 @@ export default function FileTransfer({ onSendFile, receivedFiles = [] }) {
               open();
             }}
             className="mt-4 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors"
-            data-umami-event="选择文件"
+            data-insightflare-event="选择文件"
           >
             选择文件
           </button>
@@ -1176,7 +1176,9 @@ export default function FileTransfer({ onSendFile, receivedFiles = [] }) {
                         onClick={() => handleSendFile(fileObj)}
                         disabled={sending[fileObj.id] || inProgress}
                         className="ml-2 px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-sm rounded transition-colors flex items-center disabled:opacity-50 disabled:cursor-not-allowed"
-                        data-umami-event="发送文件"
+                        data-insightflare-event="发送文件"
+                        data-insightflare-event-filetype={fileObj.file.type.split('/')[0] || 'unknown'}
+                        data-insightflare-event-size={fileObj.file.size < 1048576 ? '<1MB' : fileObj.file.size < 10485760 ? '1-10MB' : fileObj.file.size < 104857600 ? '10-100MB' : '>100MB'}
                       >
                         {sending[fileObj.id] ? '发送中...' : '发送'}
                       </button>
@@ -1187,7 +1189,9 @@ export default function FileTransfer({ onSendFile, receivedFiles = [] }) {
                       <button
                         onClick={() => handleRetryFile(fileObj)}
                         className="ml-2 px-3 py-1 bg-red-600 hover:bg-red-700 text-white text-sm rounded transition-colors flex items-center"
-                        data-umami-event="重试发送文件"
+                        data-insightflare-event="重试发送文件"
+                        data-insightflare-event-filetype={fileObj.file.type.split('/')[0] || 'unknown'}
+                        data-insightflare-event-size={fileObj.file.size < 1048576 ? '<1MB' : fileObj.file.size < 10485760 ? '1-10MB' : fileObj.file.size < 104857600 ? '10-100MB' : '>100MB'}
                       >
                         <span>重试</span>
                       </button>
@@ -1198,7 +1202,10 @@ export default function FileTransfer({ onSendFile, receivedFiles = [] }) {
                       <button
                         onClick={() => removeFile(fileObj.id)}
                         className="ml-2 text-gray-500 hover:text-red-500 flex-shrink-0 p-1"
-                        data-umami-event="移除文件"
+                        data-insightflare-event="移除文件"
+                        data-insightflare-event-filetype={fileObj.file.type.split('/')[0] || 'unknown'}
+                        data-insightflare-event-size={fileObj.file.size < 1048576 ? '<1MB' : fileObj.file.size < 10485760 ? '1-10MB' : fileObj.file.size < 104857600 ? '10-100MB' : '>100MB'}
+                        data-insightflare-event-status={fileObj.status}
                       >
                         <FiX />
                       </button>
@@ -1260,7 +1267,9 @@ export default function FileTransfer({ onSendFile, receivedFiles = [] }) {
                       onClick={() => downloadFile(file)}
                       disabled={!file.data}
                       className="ml-2 px-3 py-1 bg-green-600 hover:bg-green-700 text-white text-sm rounded transition-colors flex items-center disabled:opacity-50 disabled:cursor-not-allowed"
-                      data-umami-event="下载文件"
+                      data-insightflare-event="下载文件"
+                      data-insightflare-event-filetype={file.type.split('/')[0] || 'unknown'}
+                      data-insightflare-event-size={file.size < 1048576 ? '<1MB' : file.size < 10485760 ? '1-10MB' : file.size < 104857600 ? '10-100MB' : '>100MB'}
                     >
                       <FiDownload size={16} className="mr-1" />
                       <span>下载</span>
