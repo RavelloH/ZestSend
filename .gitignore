@@ -1,4 +1,7 @@
 node_modules/
+dist/
+.wrangler/
+*.tsbuildinfo
 .next
 .env.local
 .env.development.local
