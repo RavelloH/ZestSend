@@ -956,7 +956,7 @@ export default function FileTransfer({ onSendFile, receivedFiles = [] }) {
             </div>
             
             <div className="w-1/3 text-center font-medium">
-              <span title="发送进度">{Math.round(progress || 0)}%</span>
+              <span>{Math.round(progress || 0)}%</span>
             </div>
             
             <div className="w-1/3 flex items-center justify-end">
@@ -978,11 +978,11 @@ export default function FileTransfer({ onSendFile, receivedFiles = [] }) {
             <div className="flex justify-between text-xs text-gray-400 dark:text-gray-500 mt-1">
               <div className="w-1/3 flex items-center">
                 <FiDownload className="mr-1 flex-shrink-0" />
-                <span title="对方接收进度">对方接收进度</span>
+                <span>对方接收进度</span>
               </div>
               
               <div className="w-1/3 text-center font-medium">
-                <span title="对方接收进度">{Math.round(remoteProgress.progress || 0)}%</span>
+              <span>{Math.round(remoteProgress.progress || 0)}%</span>
               </div>
               
               <div className="w-1/3 text-right truncate">
@@ -1035,7 +1035,7 @@ export default function FileTransfer({ onSendFile, receivedFiles = [] }) {
             </div>
             
             <div className="w-1/3 text-center font-medium">
-              <span title="接收进度">{progress < 0.1 ? '<0.1%' : `${Math.round(safeProgress)}%`}</span>
+              <span>{progress < 0.1 ? '<0.1%' : `${Math.round(safeProgress)}%`}</span>
               <span className="text-xs opacity-75 ml-1">
                 {sentBytes > 0 && totalBytes > 0 && `(${renderByteProgress(sentBytes, totalBytes)})`}
               </span>
@@ -1068,11 +1068,11 @@ export default function FileTransfer({ onSendFile, receivedFiles = [] }) {
             <div className="flex justify-between text-xs text-gray-400 dark:text-gray-500 mt-1">
               <div className="w-1/3 flex items-center">
                 <FiUpload className="mr-1 flex-shrink-0" />
-                <span title="对方发送进度">对方发送进度</span>
+                <span>对方发送进度</span>
               </div>
               
               <div className="w-1/3 text-center font-medium">
-                <span title="对方发送进度">{Math.round(remoteSend.progress || 0)}%</span>
+              <span>{Math.round(remoteSend.progress || 0)}%</span>
               </div>
               
               <div className="w-1/3 text-right truncate">

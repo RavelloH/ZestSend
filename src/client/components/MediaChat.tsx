@@ -120,7 +120,6 @@ export default function MediaChat({
               ? 'bg-green-500 hover:bg-green-600 text-white' 
               : 'bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-800 dark:text-gray-200'
           } transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
-          title={audioEnabled ? "关闭麦克风" : "开启麦克风"}
           data-insightflare-event={audioEnabled ? "关闭语音通话" : "开启语音通话"}
         >
           {audioEnabled ? <FiMic size={20} /> : <FiMicOff size={20} />}
@@ -134,7 +133,6 @@ export default function MediaChat({
               ? 'bg-green-500 hover:bg-green-600 text-white' 
               : 'bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-800 dark:text-gray-200'
           } transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
-          title={videoEnabled ? "关闭摄像头" : "开启摄像头"}
           data-insightflare-event={videoEnabled ? "关闭视频通话" : "开启视频通话"}
         >
           {videoEnabled ? <FiVideo size={20} /> : <FiVideoOff size={20} />}
@@ -144,7 +142,6 @@ export default function MediaChat({
           <button
             onClick={endCall}
             className="p-3 rounded-full bg-red-500 hover:bg-red-600 text-white transition-colors"
-            title="结束通话"
             data-insightflare-event="结束通话"
           >
             <FiPhoneOff size={20} />

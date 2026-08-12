@@ -14,6 +14,7 @@ import { createPortal } from "react-dom";
 import { AnimatePresence, type HTMLMotionProps, motion } from "framer-motion";
 
 import { cn } from "@/lib/utils";
+import { OverlayScrollbar } from "./overlay-scrollbar";
 
 type DialogContextValue = {
   onOpenChange: (open: boolean) => void;
@@ -94,7 +95,7 @@ export function Dialog({
             ref={layerRef}
             animate={{ opacity: 1 }}
             aria-label="Dialog overlay"
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-[#01030a]/65 p-4 backdrop-blur-md sm:p-8"
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm sm:p-8"
             exit={{ opacity: 0 }}
             initial={{ opacity: 0 }}
             onMouseDown={(event) => {
@@ -111,12 +112,12 @@ export function Dialog({
 }
 
 export const DialogContent = forwardRef<HTMLDivElement, HTMLMotionProps<"div">>(
-  ({ className, ...props }, ref) => (
+  ({ className, children, ...props }, ref) => (
     <motion.div
       ref={ref}
       animate={{ opacity: 1, scale: 1, y: 0 }}
       className={cn(
-        "w-full max-w-3xl overflow-hidden rounded-lg border border-sky-100/15 bg-[#06111f]/75 text-slate-100 shadow-[0_24px_96px_rgba(0,0,0,0.5)] backdrop-blur-3xl",
+        "glass zest-dialog-content flex w-full max-w-3xl flex-col overflow-hidden rounded-lg text-gray-100",
         className,
       )}
       exit={{ opacity: 0, scale: 0.98, y: 18 }}
@@ -124,14 +125,16 @@ export const DialogContent = forwardRef<HTMLDivElement, HTMLMotionProps<"div">>(
       role="dialog"
       transition={{ type: "spring", stiffness: 380, damping: 32, mass: 0.8 }}
       {...props}
-    />
+    >
+      <OverlayScrollbar className="min-h-0 flex-1 overscroll-contain">{children as ReactNode}</OverlayScrollbar>
+    </motion.div>
   ),
 );
 
 DialogContent.displayName = "DialogContent";
 
 export function DialogHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("flex items-start justify-between gap-6 border-b border-sky-100/10 p-6 sm:p-9", className)} {...props} />;
+  return <div className={cn("flex items-start justify-between gap-6 border-b border-white/[0.1] p-6 sm:p-9", className)} {...props} />;
 }
 
 export function DialogTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
@@ -143,14 +146,15 @@ export function DialogDescription({ className, ...props }: HTMLAttributes<HTMLPa
 }
 
 export const DialogClose = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLButtonElement>>(
-  ({ className, onClick, ...props }, ref) => {
+  ({ className, onClick, "aria-label": ariaLabel, ...props }, ref) => {
     const { onOpenChange } = useDialog();
 
     return (
       <button
         ref={ref}
+        aria-label={ariaLabel}
         className={cn(
-          "inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-sky-100/15 text-sky-100/75 transition-colors hover:bg-sky-100/10 hover:text-sky-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60",
+          "inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-white/[0.1] bg-transparent text-sky-100/75 transition-colors hover:bg-white/[0.05] hover:text-sky-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60",
           className,
         )}
         onClick={(event) => {

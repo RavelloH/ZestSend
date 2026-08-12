@@ -16,7 +16,6 @@ interface ClickableProps extends Omit<
   hoverScale?: number;
   tapScale?: number;
   duration?: number;
-  title?: string;
   "aria-label"?: string;
 }
 
@@ -31,7 +30,6 @@ export const Clickable = forwardRef<HTMLDivElement, ClickableProps>(
       hoverScale = 1.16,
       tapScale = 0.94,
       duration = 0.16,
-      title,
       "aria-label": ariaLabel,
       ...props
     },
@@ -63,7 +61,6 @@ export const Clickable = forwardRef<HTMLDivElement, ClickableProps>(
         onKeyDown={handleKeyDown}
         role="button"
         tabIndex={disabled ? -1 : 0}
-        title={title}
         transition={{ duration, ease: "easeOut" }}
         whileHover={!disabled && enableHoverScale ? { scale: hoverScale } : undefined}
         whileTap={!disabled ? { scale: tapScale } : undefined}

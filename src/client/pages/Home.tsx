@@ -24,6 +24,7 @@ import {
 } from "react";
 import { motion } from "framer-motion";
 import Layout from "../components/Layout";
+import { appThemes, useTheme } from "../components/theme";
 import { CursorDrivenParticleTypography } from "../components/ui/cursor-driven-particle-typography";
 import { AutoTransition } from "../components/ui/auto-transition";
 import { Clickable } from "../components/ui/clickable";
@@ -36,6 +37,7 @@ import {
   DialogTitle,
 } from "../components/ui/dialog";
 import { LetterCascade } from "../components/ui/letter-cascade";
+import { Signature } from "../components/ui/signature";
 import { TextMorph } from "../components/ui/text-morph";
 import { TextRepel } from "../components/ui/text-repel";
 
@@ -67,6 +69,17 @@ const homeCopy: Record<
       description: string;
       title: string;
     };
+    settingsDialog: {
+      close: string;
+      description: string;
+      title: string;
+    };
+    aboutDialog: {
+      close: string;
+      description: string;
+      intro: string;
+      title: string;
+    };
   }
 > = {
   en: {
@@ -81,6 +94,17 @@ const homeCopy: Record<
       close: "Close language picker",
       description: "Choose the language used on the ZestSend home page.",
       title: "Language",
+    },
+    settingsDialog: {
+      close: "Close settings",
+      description: "Choose the colors used throughout ZestSend.",
+      title: "Appearance",
+    },
+    aboutDialog: {
+      close: "Close about ZestSend",
+      description: "An open-source P2P connection tool for secure, private data transfer.",
+      intro: "ZestSend is a WebRTC-powered peer-to-peer (P2P) data transfer website that lets you send data securely and privately, without server relays or storage.",
+      title: "About ZestSend",
     },
     activities: [
       { word: "share files", icon: "file" },
@@ -110,6 +134,17 @@ const homeCopy: Record<
       close: "关闭语言选择",
       description: "选择 ZestSend 首页使用的语言。",
       title: "语言",
+    },
+    settingsDialog: {
+      close: "关闭设置",
+      description: "选择 ZestSend 使用的背景和强调色。",
+      title: "外观",
+    },
+    aboutDialog: {
+      close: "关闭关于 ZestSend",
+      description: "开源的 P2P 连接工具，提供安全、私密的 P2P 数据传输。",
+      intro: "ZestSend 是一个基于 WebRTC 的点对点（P2P）数据传输网站，支持安全、私密地传输数据，无需通过服务器中转或存储。",
+      title: "关于 ZestSend",
     },
     activities: [
       { word: "共享文件", icon: "file" },
@@ -160,13 +195,17 @@ function ConnectionCodeInput({
   inputLabel,
   hint,
   links,
+  onAboutClick,
   onLanguageClick,
+  onSettingsClick,
 }: {
   length: number;
   inputLabel: string;
   hint: string;
   links: readonly string[];
+  onAboutClick: () => void;
   onLanguageClick: () => void;
+  onSettingsClick: () => void;
 }) {
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const [code, setCode] = useState(() => Array.from({ length }, () => ""));
@@ -352,7 +391,12 @@ function ConnectionCodeInput({
       <p className="mt-5 text-center text-[clamp(0.8rem,3.4vw,1.25rem)] font-semibold tracking-[0.06em] text-sky-100/85 sm:tracking-[0.1em]">
         {hint}
       </p>
-      <FooterLinks links={links} onLanguageClick={onLanguageClick} />
+      <FooterLinks
+        links={links}
+        onAboutClick={onAboutClick}
+        onLanguageClick={onLanguageClick}
+        onSettingsClick={onSettingsClick}
+      />
       <ProjectAttribution />
     </div>
   );
@@ -392,8 +436,19 @@ function ProjectAttribution() {
   );
 }
 
-function FooterLinks({ links, onLanguageClick }: { links: readonly string[]; onLanguageClick: () => void }) {
+function FooterLinks({
+  links,
+  onAboutClick,
+  onLanguageClick,
+  onSettingsClick,
+}: {
+  links: readonly string[];
+  onAboutClick: () => void;
+  onLanguageClick: () => void;
+  onSettingsClick: () => void;
+}) {
   const icons = [RiGlobalLine, RiSettings3Line, RiInformationLine];
+  const actions = [onLanguageClick, onSettingsClick, onAboutClick];
 
   return (
     <nav aria-label="Footer navigation" className="mt-7 flex justify-center sm:mt-8">
@@ -403,8 +458,7 @@ function FooterLinks({ links, onLanguageClick }: { links: readonly string[]; onL
             key={link}
             aria-label={link}
             className="size-7 text-inherit sm:size-8"
-            onClick={index === 0 ? onLanguageClick : undefined}
-            title={link}
+            onClick={actions[index]}
           >
             {(() => {
               const Icon = icons[index] ?? RiInformationLine;
@@ -429,16 +483,17 @@ function LanguageDialog({
   open: boolean;
 }) {
   const copy = homeCopy[locale].languageDialog;
-  const options: Array<{ description: string; locale: HomeLocale; name: string }> = [
+  const { theme } = useTheme();
+  const options: Array<{ locale: HomeLocale; name: string; preview: string }> = [
     {
       locale: "zh",
       name: "简体中文",
-      description: locale === "zh" ? "使用简体中文浏览 ZestSend" : "Use Simplified Chinese",
+      preview: "我能吞下玻璃而不伤身体",
     },
     {
       locale: "en",
       name: "English",
-      description: locale === "zh" ? "使用 English 浏览 ZestSend" : "Use English to browse ZestSend",
+      preview: "I can eat glass and it doesn't hurt me.",
     },
   ];
 
@@ -447,16 +502,16 @@ function LanguageDialog({
       <DialogContent
         aria-describedby="language-dialog-description"
         aria-labelledby="language-dialog-title"
-        className="min-h-[26rem]"
+        className="!max-w-xl"
       >
-        <DialogHeader>
+        <DialogHeader className="p-5 sm:p-6">
           <div>
-            <DialogTitle id="language-dialog-title">{copy.title}</DialogTitle>
-            <DialogDescription id="language-dialog-description">{copy.description}</DialogDescription>
+            <DialogTitle id="language-dialog-title" className="text-xl sm:text-2xl">{copy.title}</DialogTitle>
+            <DialogDescription id="language-dialog-description" className="mt-1 text-xs sm:text-sm">{copy.description}</DialogDescription>
           </div>
-          <DialogClose aria-label={copy.close} data-dialog-autofocus title={copy.close} />
+          <DialogClose aria-label={copy.close} data-dialog-autofocus />
         </DialogHeader>
-        <div className="grid gap-3 p-6 sm:grid-cols-2 sm:gap-4 sm:p-9">
+        <div className="flex flex-col divide-y divide-white/10">
           {options.map((option) => {
             const selected = option.locale === locale;
 
@@ -464,22 +519,145 @@ function LanguageDialog({
               <button
                 key={option.locale}
                 aria-pressed={selected}
-                className={`flex min-h-36 flex-col items-start justify-between rounded-md border p-5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60 sm:p-6 ${
+                className={`relative flex min-h-24 flex-col justify-center gap-2 px-5 py-5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-sky-100/60 sm:px-6 sm:py-6 ${
                   selected
-                    ? "border-emerald-300/55 bg-emerald-300/10 text-emerald-100"
-                    : "border-sky-100/12 bg-sky-100/[0.03] text-sky-50 hover:border-sky-100/35 hover:bg-sky-100/[0.07]"
+                    ? "text-sky-50"
+                    : "text-sky-50 hover:bg-white/[0.04]"
                 }`}
                 onClick={() => onSelect(option.locale)}
+                style={selected ? { backgroundColor: `${theme.accent}1A`, color: theme.accent } : undefined}
                 type="button"
               >
-                <span className="text-xl font-bold tracking-[0.04em]">{option.name}</span>
-                <span className="flex w-full items-end justify-between gap-4 text-sm font-medium tracking-[0.04em] text-sky-100/60">
-                  {option.description}
-                  {selected ? <Check aria-label="Selected" className="size-5 shrink-0 text-emerald-300" /> : null}
+                {selected ? <span aria-hidden="true" className="absolute inset-y-0 left-0 w-0.5" style={{ backgroundColor: theme.accent }} /> : null}
+                <span className="text-lg font-bold tracking-[0.04em] sm:text-xl">{option.name}</span>
+                <span className="flex w-full items-center justify-between gap-4 text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/60 sm:text-base">
+                  <span>{option.preview}</span>
+                  {selected ? <Check aria-label="Selected" className="size-5 shrink-0" style={{ color: theme.accent }} /> : null}
                 </span>
               </button>
             );
           })}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function SettingsDialog({
+  locale,
+  onOpenChange,
+  open,
+}: {
+  locale: HomeLocale;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
+}) {
+  const copy = homeCopy[locale].settingsDialog;
+  const { setThemeId, themeId } = useTheme();
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        aria-describedby="settings-dialog-description"
+        aria-labelledby="settings-dialog-title"
+        className="!max-w-xl"
+      >
+        <DialogHeader className="p-5 sm:p-6">
+          <div>
+            <DialogTitle id="settings-dialog-title" className="text-xl sm:text-2xl">{copy.title}</DialogTitle>
+            <DialogDescription id="settings-dialog-description" className="mt-1 text-xs sm:text-sm">{copy.description}</DialogDescription>
+          </div>
+          <DialogClose aria-label={copy.close} data-dialog-autofocus />
+        </DialogHeader>
+        <div className="flex flex-col divide-y divide-white/10">
+          {appThemes.map((theme) => {
+            const selected = theme.id === themeId;
+
+            return (
+              <button
+                key={theme.id}
+                aria-pressed={selected}
+                className={`relative flex h-24 items-center px-5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-sky-100/60 sm:px-6 ${
+                  selected ? "text-sky-50" : "text-sky-50 hover:bg-white/[0.04]"
+                }`}
+                onClick={() => setThemeId(theme.id)}
+                style={selected ? { backgroundColor: `${theme.accent}1A`, color: theme.accent } : undefined}
+                type="button"
+              >
+                {selected ? <span aria-hidden="true" className="absolute inset-y-0 left-0 w-0.5" style={{ backgroundColor: theme.accent }} /> : null}
+                <span className="flex min-w-0 flex-col gap-0.5 pr-44">
+                  <span className="text-base font-bold tracking-[0.04em] sm:text-lg">{theme.name[locale]}</span>
+                  <span className="text-xs font-medium leading-snug tracking-[0.03em] text-sky-100/55">{theme.description[locale]}</span>
+                </span>
+                {selected ? <Check aria-label="Selected" className="absolute right-40 top-1/2 size-5 -translate-y-1/2" style={{ color: theme.accent }} /> : null}
+                <span aria-hidden="true" className="absolute inset-y-0 right-0 flex">
+                  {[theme.deep, theme.mid, theme.highlight].map((color) => (
+                    <span key={color} className="h-full aspect-[1/2]" style={{ backgroundColor: color }} />
+                  ))}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AboutDialog({
+  locale,
+  onOpenChange,
+  open,
+}: {
+  locale: HomeLocale;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
+}) {
+  const copy = homeCopy[locale].aboutDialog;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        aria-describedby="about-dialog-description"
+        aria-labelledby="about-dialog-title"
+        className="!max-w-xl"
+      >
+        <DialogHeader className="p-5 sm:p-6">
+          <div>
+            <DialogTitle id="about-dialog-title" className="text-xl sm:text-2xl">{copy.title}</DialogTitle>
+            <DialogDescription id="about-dialog-description" className="mt-1 text-xs sm:text-sm">{copy.description}</DialogDescription>
+          </div>
+          <DialogClose aria-label={copy.close} data-dialog-autofocus />
+        </DialogHeader>
+        <div className="space-y-7 p-5 text-sm leading-relaxed text-sky-100/75 sm:p-6 sm:text-base">
+          <p>{copy.intro}</p>
+          <a
+            className="inline-flex w-fit items-center gap-2 font-semibold text-sky-100 transition-colors hover:text-white"
+            href="https://github.com/ravelloh/zestsend"
+            rel="noreferrer"
+            target="_blank"
+          >
+            <RiGithubFill aria-hidden="true" className="size-5" />
+            RavelloH/ZestSend
+          </a>
+          <div className="border-t border-white/10 pt-10 sm:pt-12">
+            <a
+              aria-label="Visit RavelloH"
+              className="group flex justify-center py-1 text-sky-100/80 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60"
+              href="https://ravelloh.com"
+              rel="noreferrer"
+              target="_blank"
+            >
+              <Signature
+                className="transition-opacity duration-300 group-hover:opacity-100"
+                color="currentColor"
+                duration={3}
+                fontSize={24}
+                fontUrl="/LastoriaBoldRegular.otf"
+                text="RavelloH"
+              />
+            </a>
+          </div>
         </div>
       </DialogContent>
     </Dialog>
@@ -495,7 +673,9 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
   );
   const prefixWords = useMemo(() => [copy.prefix], [copy.prefix]);
   const [activeActivity, setActiveActivity] = useState(morphActivities[0]!);
+  const [isAboutDialogOpen, setAboutDialogOpen] = useState(false);
   const [isLanguageDialogOpen, setLanguageDialogOpen] = useState(false);
+  const [isSettingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -599,7 +779,9 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
             hint={copy.codeHint}
             inputLabel={copy.codeInputLabel}
             links={copy.footerLinks}
+            onAboutClick={() => setAboutDialogOpen(true)}
             onLanguageClick={() => setLanguageDialogOpen(true)}
+            onSettingsClick={() => setSettingsDialogOpen(true)}
           />
         </div>
         <LanguageDialog
@@ -607,6 +789,16 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
           onOpenChange={setLanguageDialogOpen}
           onSelect={handleLanguageSelect}
           open={isLanguageDialogOpen}
+        />
+        <SettingsDialog
+          locale={locale}
+          onOpenChange={setSettingsDialogOpen}
+          open={isSettingsDialogOpen}
+        />
+        <AboutDialog
+          locale={locale}
+          onOpenChange={setAboutDialogOpen}
+          open={isAboutDialogOpen}
         />
       </section>
     </Layout>

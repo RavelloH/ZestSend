@@ -1,3 +1,4 @@
+@import "overlayscrollbars/styles/overlayscrollbars.css";
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -13,4 +14,80 @@ body {
   background: transparent;
   padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
+:root {
+  --zest-scrollbar-thumb: #67d5ff;
+}
+
+.glass {
+  border: 1px solid rgb(255 255 255 / 0.1);
+  background-color: rgb(0 0 0 / 0.62);
+  box-shadow: 0 16px 48px rgb(0 0 0 / 0.48);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+}
+
+* {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.zest-dialog-content {
+  max-height: min(44rem, calc(100dvh - 2rem));
+}
+
+.os-theme-zestsend {
+  --os-size: 8px;
+  --os-padding-perpendicular: 1px;
+  --os-padding-axis: 1px;
+  --os-track-border-radius: 999px;
+  --os-handle-border-radius: 999px;
+  --os-handle-bg: color-mix(in srgb, var(--zest-scrollbar-thumb) 68%, transparent);
+  --os-handle-bg-hover: var(--zest-scrollbar-thumb);
+  --os-handle-bg-active: var(--zest-scrollbar-thumb);
+  --os-handle-perpendicular-size: 0.2rem;
+  --os-handle-perpendicular-size-hover: 0.45rem;
+  --os-handle-perpendicular-size-active: 0.45rem;
+  --os-handle-interactive-area-offset: 4px;
+  --os-track-bg: transparent;
+}
+
+.os-theme-zestsend.os-scrollbar,
+.os-theme-zestsend .os-scrollbar-handle {
+  transition: opacity 220ms cubic-bezier(0.22, 1, 0.36, 1), transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 180ms ease, width 220ms cubic-bezier(0.22, 1, 0.36, 1), height 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.os-theme-zestsend.os-scrollbar-vertical {
+  transform-origin: right center;
+}
+
+.os-theme-zestsend.os-scrollbar-vertical.os-scrollbar-auto-hide.os-scrollbar-auto-hide-hidden {
+  transform: translateX(5px) scaleX(0.72);
+}
+
+html[data-native-scrollbars="true"] *,
+html[data-native-scrollbars="true"] {
+  -ms-overflow-style: auto;
+  scrollbar-width: auto;
+}
+
+html[data-native-scrollbars="true"] *::-webkit-scrollbar,
+html[data-native-scrollbars="true"]::-webkit-scrollbar {
+  display: initial;
+  width: initial;
+  height: initial;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .os-theme-zestsend.os-scrollbar,
+  .os-theme-zestsend .os-scrollbar-handle {
+    transition: none !important;
+  }
 }
