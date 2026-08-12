@@ -1,13 +1,15 @@
 import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
 import Home from "./pages/Home";
+import LocaleRedirect from "./pages/LocaleRedirect";
+import NotFound from "./pages/NotFound";
 import Room from "./pages/Room";
 
-const rootRoute = createRootRoute({ component: Outlet });
+const rootRoute = createRootRoute({ component: Outlet, notFoundComponent: NotFound });
 
 const homeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: Home,
+  component: LocaleRedirect,
 });
 
 const englishHomeRoute = createRoute({

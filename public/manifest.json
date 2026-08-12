@@ -1,11 +1,11 @@
 {
   "name": "ZestSend",
   "short_name": "ZestSend",
-  "description": "安全、私密的P2P文件传输",
+  "description": "安全、私密的 P2P 连接与数据传输",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#4F46E5",
+  "background_color": "#02040b",
+  "theme_color": "#02040b",
   "icons": [
     {
       "src": "/android-chrome-192x192.png",
