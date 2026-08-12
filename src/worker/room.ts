@@ -1,174 +1,89 @@
 import { DurableObject } from "cloudflare:workers";
 
-export type PeerRole = "initiator" | "receiver";
+type SignalPayload = {
+  candidate?: {
+    candidate: string;
+    sdpMLineIndex?: number | null;
+    sdpMid?: string | null;
+    usernameFragment?: string | null;
+  };
+  description?: {
+    sdp?: string;
+    type: "answer" | "offer" | "pranswer" | "rollback";
+  };
+};
 
-export interface PeerRecord {
-  id?: string;
-  type?: PeerRole;
-  ip: string;
-  joinedAt: string;
-}
+type SocketAttachment = {
+  peerId: string;
+};
 
-export interface IpInfo {
-  ip: string;
-  city: string;
-  region: string;
-  country_name: string;
-  country_code: string;
-  latitude: number;
-  longitude: number;
-  timezone: string;
-  org: string;
-  _fallback?: boolean;
-}
+const MAX_PEERS = 2;
 
-interface RoomRecord {
-  createdAt: string;
-  expiresAt: number;
-  peers: PeerRecord[];
-  ipInfo: Record<string, IpInfo>;
-}
-
-const ROOM_TTL_MS = 3 * 60 * 60 * 1000;
-
-/**
- * One Durable Object is assigned to each room code.  It replaces the former
- * short-lived Redis record while preserving its two-peer, IP-aware semantics.
- */
+/** A room owns exactly the two WebSocket clients needed for WebRTC signaling. */
 export class Room extends DurableObject<Env> {
-  private async getActiveRoom(): Promise<RoomRecord | null> {
-    const room = await this.ctx.storage.get<RoomRecord>("room");
-
-    if (room && room.expiresAt <= Date.now()) {
-      await this.ctx.storage.delete("room");
-      return null;
+  async fetch(request: Request): Promise<Response> {
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("Expected a WebSocket upgrade.", { status: 426 });
     }
 
-    return room ?? null;
+    const peers = this.ctx.getWebSockets();
+    if (peers.length >= MAX_PEERS) {
+      return Response.json({ message: "Room is full." }, { status: 403 });
+    }
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    const peerId = crypto.randomUUID();
+
+    server.serializeAttachment({ peerId } satisfies SocketAttachment);
+    this.ctx.acceptWebSocket(server);
+
+    const isInitiator = peers.length === 0;
+    this.send(server, { type: "welcome", peerId, isInitiator, peerCount: peers.length + 1 });
+    if (!isInitiator) this.broadcast({ type: "peer-ready", peerId }, server);
+
+    return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async saveRoom(room: RoomRecord): Promise<void> {
-    room.expiresAt = Date.now() + ROOM_TTL_MS;
-    await this.ctx.storage.put("room", room);
-  }
+  webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
+    if (typeof message !== "string") return;
 
-  async exists(): Promise<boolean> {
-    return (await this.getActiveRoom()) !== null;
-  }
-
-  async initialize(clientIp: string): Promise<
-    | { roomFull: true }
-    | { roomFull: false; isInitiator: boolean }
-  > {
-    let room = await this.getActiveRoom();
-    const isInitiator = room === null;
-
-    if (room) {
-      const isKnownPeer = room.peers.some((peer) => peer.ip === clientIp);
-      if (!isKnownPeer && room.peers.length >= 2) {
-        return { roomFull: true };
+    try {
+      const parsed = JSON.parse(message) as { type?: string; payload?: SignalPayload };
+      if (parsed.type === "ping") {
+        this.send(socket, { type: "pong" });
+        return;
       }
-    } else {
-      room = {
-        createdAt: new Date().toISOString(),
-        expiresAt: Date.now() + ROOM_TTL_MS,
-        peers: [{ ip: clientIp, joinedAt: new Date().toISOString() }],
-        ipInfo: {},
-      };
-      await this.saveRoom(room);
-      return { roomFull: false, isInitiator: true };
-    }
+      if (parsed.type !== "signal" || !parsed.payload) return;
 
-    if (!room.peers.some((peer) => peer.ip === clientIp)) {
-      room.peers.push({ ip: clientIp, joinedAt: new Date().toISOString() });
-      await this.saveRoom(room);
+      const sender = socket.deserializeAttachment() as SocketAttachment | null;
+      this.broadcast({ type: "signal", from: sender?.peerId, payload: parsed.payload }, socket);
+    } catch {
+      this.send(socket, { type: "error", message: "Invalid signaling message." });
     }
-
-    return { roomFull: false, isInitiator };
   }
 
-  async register(peerId: string, isInitiator: boolean, clientIp: string): Promise<
-    | { found: false }
-    | { found: true; alreadyRegistered: boolean }
-  > {
-    const room = await this.getActiveRoom();
-    if (!room) {
-      return { found: false };
-    }
-
-    if (room.peers.some((peer) => peer.id === peerId)) {
-      return { found: true, alreadyRegistered: true };
-    }
-
-    const peer: PeerRecord = {
-      id: peerId,
-      type: isInitiator ? "initiator" : "receiver",
-      ip: clientIp,
-      joinedAt: new Date().toISOString(),
-    };
-    const currentPeer = room.peers.findIndex((entry) => entry.ip === clientIp);
-
-    if (currentPeer >= 0) {
-      room.peers[currentPeer] = peer;
-    } else {
-      room.peers.push(peer);
-    }
-
-    await this.saveRoom(room);
-    return { found: true, alreadyRegistered: false };
+  webSocketClose(socket: WebSocket): void {
+    const peer = socket.deserializeAttachment() as SocketAttachment | null;
+    this.broadcast({ type: "peer-left", peerId: peer?.peerId }, socket);
   }
 
-  async poll(peerId: string): Promise<
-    | { found: false }
-    | {
-        found: true;
-        remotePeerId: string | null;
-        remotePeerType: PeerRole | null;
-        ipInfo: IpInfo | null;
-        selfIPInfo: IpInfo | null;
-        peerCount: number;
-        shouldInitiateConnection: boolean;
-        connectionPriority: "high" | "normal";
-      }
-  > {
-    const room = await this.getActiveRoom();
-    if (!room) {
-      return { found: false };
-    }
-
-    const self = room.peers.find((peer) => peer.id === peerId);
-    const remote = room.peers.find(
-      (peer) => peer.id && peer.id !== peerId && peer.ip !== self?.ip,
-    );
-    const remotePeerId = remote?.id ?? null;
-    const canConnect = remotePeerId !== null;
-
-    return {
-      found: true,
-      remotePeerId,
-      remotePeerType: remote?.type ?? null,
-      ipInfo: remotePeerId ? room.ipInfo[remotePeerId] ?? null : null,
-      selfIPInfo: room.ipInfo[peerId] ?? null,
-      peerCount: room.peers.length,
-      shouldInitiateConnection: canConnect,
-      connectionPriority:
-        canConnect && peerId.localeCompare(remotePeerId) < 0 ? "high" : "normal",
-    };
+  webSocketError(socket: WebSocket): void {
+    socket.close(1011, "Signaling error");
   }
 
-  async storeIpInfo(peerId: string, ipInfo: IpInfo): Promise<boolean> {
-    const room = await this.getActiveRoom();
-    if (!room) {
-      return false;
+  private broadcast(payload: object, except?: WebSocket): void {
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket !== except) this.send(socket, payload);
     }
-
-    room.ipInfo[peerId] = ipInfo;
-    await this.saveRoom(room);
-    return true;
   }
 
-  async getIpInfo(peerId: string): Promise<IpInfo | null> {
-    const room = await this.getActiveRoom();
-    return room?.ipInfo[peerId] ?? null;
+  private send(socket: WebSocket, payload: object): void {
+    try {
+      socket.send(JSON.stringify(payload));
+    } catch {
+      socket.close(1011, "Unable to deliver signaling message");
+    }
   }
 }

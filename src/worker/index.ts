@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { Room, type IpInfo } from "./room";
+import { Room } from "./room";
 
 type ApiBindings = Env & {
   TURN_ID?: string;
@@ -81,15 +81,6 @@ function roomIsValid(roomId: string | undefined): roomId is string {
   return /^\d{4}$/.test(roomId ?? "");
 }
 
-function clientIp(request: Request): string {
-  const forwarded = request.headers.get("x-forwarded-for");
-  return (
-    request.headers.get("CF-Connecting-IP") ??
-    forwarded?.split(",")[0]?.trim() ??
-    "127.0.0.1"
-  );
-}
-
 function roomFor(env: ApiBindings, roomId: string) {
   return env.ROOMS.getByName(roomId);
 }
@@ -98,175 +89,22 @@ function methodNotAllowed(message: string): Response {
   return Response.json({ message }, { status: 405 });
 }
 
-app.get("/api/room/check", async (context) => {
-  const roomId = context.req.query("roomId");
-  if (!roomIsValid(roomId)) {
-    return context.json({ message: "无效的房间ID" }, 400);
+app.get("/api/rooms/:roomId/ws", async (context) => {
+  const roomId = context.req.param("roomId");
+  if (!roomIsValid(roomId)) return context.json({ message: "Invalid room ID." }, 400);
+  if (context.req.header("Upgrade") !== "websocket") {
+    return context.json({ message: "Expected a WebSocket upgrade." }, 426);
   }
 
-  const exists = await roomFor(context.env, roomId).exists();
-  return context.json({
-    roomId,
-    exists,
-    message: exists ? "房间已存在" : "房间不存在, 将创建新房间",
-  });
+  return roomFor(context.env, roomId).fetch(context.req.raw);
 });
-
-app.all("/api/room/check", () => methodNotAllowed("只允许GET请求"));
-
-app.get("/api/room/init", async (context) => {
-  const roomId = context.req.query("roomId");
-  if (!roomIsValid(roomId)) {
-    return context.json({ message: "无效的房间ID" }, 400);
-  }
-
-  const outcome = await roomFor(context.env, roomId).initialize(clientIp(context.req.raw));
-  if (outcome.roomFull) {
-    return context.json({ message: "房间已满，无法加入", roomFull: true }, 403);
-  }
-
-  return context.json({
-    roomId,
-    isInitiator: outcome.isInitiator,
-    userIP: clientIp(context.req.raw),
-    message: outcome.isInitiator ? "创建了新房间" : "加入了已存在的房间",
-  });
-});
-
-app.all("/api/room/init", () => methodNotAllowed("只允许GET请求"));
-
-app.post("/api/signaling/register", async (context) => {
-  const body = await context.req.json<{
-    roomId?: string;
-    peerId?: string;
-    isInitiator?: boolean;
-  }>();
-
-  if (!roomIsValid(body.roomId) || !body.peerId) {
-    return context.json({ message: "缺少必要参数" }, 400);
-  }
-
-  const ip = clientIp(context.req.raw);
-  const result = await roomFor(context.env, body.roomId).register(
-    body.peerId,
-    Boolean(body.isInitiator),
-    ip,
-  );
-
-  if (!result.found) {
-    return context.json({ message: "房间不存在" }, 404);
-  }
-
-  return context.json({
-    success: true,
-    peerId: body.peerId,
-    roomId: body.roomId,
-    ip,
-    ...(result.alreadyRegistered ? { alreadyRegistered: true } : {}),
-  });
-});
-
-app.all("/api/signaling/register", () => methodNotAllowed("只允许POST请求"));
-
-app.get("/api/signaling/poll", async (context) => {
-  const roomId = context.req.query("roomId");
-  const peerId = context.req.query("peerId");
-  if (!roomIsValid(roomId) || !peerId) {
-    return context.json({ message: "缺少必要参数" }, 400);
-  }
-
-  const result = await roomFor(context.env, roomId).poll(peerId);
-  if (!result.found) {
-    return context.json({ message: "房间不存在" }, 404);
-  }
-
-  return context.json({
-    roomId,
-    peerId,
-    remotePeerId: result.remotePeerId,
-    remotePeerType: result.remotePeerType,
-    ipInfo: result.ipInfo,
-    selfIPInfo: result.selfIPInfo,
-    timestamp: Date.now(),
-    peerCount: result.peerCount,
-    shouldInitiateConnection: result.shouldInitiateConnection,
-    connectionPriority: result.connectionPriority,
-  });
-});
-
-app.all("/api/signaling/poll", () => methodNotAllowed("只允许GET请求"));
-
-app.get("/api/signaling/ip", async (context) => {
-  const roomId = context.req.query("roomId");
-  const peerId = context.req.query("peerId");
-  if (!roomIsValid(roomId) || !peerId) {
-    return context.json({ message: "缺少必要参数" }, 400);
-  }
-
-  return context.json({ ipInfo: await roomFor(context.env, roomId).getIpInfo(peerId) });
-});
-
-app.post("/api/signaling/ip", async (context) => {
-  const body = await context.req.json<{
-    roomId?: string;
-    peerId?: string;
-    ipInfo?: IpInfo;
-  }>();
-  if (!roomIsValid(body.roomId) || !body.peerId || !body.ipInfo) {
-    return context.json({ message: "缺少必要参数 roomId、peerId 或 ipInfo" }, 400);
-  }
-
-  const stored = await roomFor(context.env, body.roomId).storeIpInfo(body.peerId, body.ipInfo);
-  if (!stored) {
-    return context.json({ message: "房间不存在" }, 404);
-  }
-
-  return context.json({ success: true, message: "IP信息存储成功", verified: true });
-});
-
-app.all("/api/signaling/ip", () => methodNotAllowed("不支持的请求方法"));
-
-app.get("/api/ip", async (context) => {
-  const roomId = context.req.query("roomId");
-  const peerId = context.req.query("peerId");
-  const requestCf = context.req.raw.cf as
-    | {
-        city?: string;
-        region?: string;
-        country?: string;
-        latitude?: string | number;
-        longitude?: string | number;
-        timezone?: string;
-        asOrganization?: string;
-      }
-    | undefined;
-  const ipInfo: IpInfo = {
-    ip: clientIp(context.req.raw),
-    city: requestCf?.city ?? "Unknown",
-    region: requestCf?.region ?? "Unknown",
-    country_name: requestCf?.country ?? "Unknown",
-    country_code: requestCf?.country ?? "Unknown",
-    latitude: Number(requestCf?.latitude ?? 0),
-    longitude: Number(requestCf?.longitude ?? 0),
-    timezone: requestCf?.timezone ?? "Unknown",
-    org: requestCf?.asOrganization ?? "Cloudflare",
-  };
-
-  if (roomIsValid(roomId) && peerId) {
-    await roomFor(context.env, roomId).storeIpInfo(peerId, ipInfo);
-  }
-
-  return context.json(ipInfo);
-});
-
-app.all("/api/ip", () => methodNotAllowed("只允许GET请求"));
 
 app.post("/api/turn/credentials", async (context) => {
   if (!context.env.TURN_ID || !context.env.TURN_TOKEN) {
     return context.json(
       {
-        error: "TURN credentials not configured",
-        message: "TURN_ID and TURN_TOKEN must be set as Worker secrets",
+        error: "TURN credentials are not configured.",
+        message: "TURN_ID and TURN_TOKEN must be set as Worker secrets.",
       },
       500,
     );
@@ -289,7 +127,7 @@ app.post("/api/turn/credentials", async (context) => {
   if (!response.ok) {
     console.error(JSON.stringify({ event: "turn_credentials_failed", status: response.status }));
     return Response.json(
-      { error: "Failed to generate TURN credentials", message: "TURN API request failed" },
+      { error: "TURN credentials could not be generated.", message: "TURN API request failed." },
       { status: response.status },
     );
   }

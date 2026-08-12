@@ -63,10 +63,10 @@ export default function ConnectionStatus({
         </p>
         <p className="text-xs text-gray-500 dark:text-gray-400">
           {/* 修改HTTP轮询状态显示逻辑，确保始终与实际状态一致 */}
-          {title === "HTTP 轮询" ? 
+          {title === "WebSocket 连接" ?
             (p2pConnection ? 
-              (httpPolling ? "P2P连接已建立但轮询未停止（状态不一致）" : "P2P连接已建立，服务器轮询暂停") 
-              : (httpPolling ? "服务器轮询正常" : "等待服务器连接...")) 
+              (httpPolling ? "P2P连接已建立但信令仍保持连接" : "P2P连接已建立")
+              : (httpPolling ? "信令连接正常" : "等待信令连接..."))
             : title === "TURN 服务器" && turnServer?.active && turnServer?.url
               ? `使用: ${turnServer.url.replace(/^(turn:|turns:)/, "").split("?")[0]}`
               : description}
@@ -95,12 +95,12 @@ export default function ConnectionStatus({
 
       <div className="space-y-3">
         {renderStatusIndicator(
-          "HTTP 轮询",
+          "WebSocket 连接",
           httpPolling,
           <FiServer
             className={httpPolling ? "text-green-500" : "text-yellow-500"}
           />,
-          httpPolling ? "服务器轮询正常" : "等待服务器连接...",
+          httpPolling ? "信令连接正常" : "等待信令连接...",
           httpLatency
         )}
         

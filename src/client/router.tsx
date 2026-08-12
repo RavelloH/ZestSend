@@ -26,6 +26,7 @@ const roomRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/room/$roomId",
   component: Room,
+  validateSearch: (search: Record<string, unknown>) => search,
 });
 
 const routeTree = rootRoute.addChildren([homeRoute, englishHomeRoute, chineseHomeRoute, roomRoute]);

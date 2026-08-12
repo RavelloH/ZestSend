@@ -5,7 +5,9 @@
   "type": "module",
   "packageManager": "pnpm@11.1.3",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 127.0.0.1 --port 8787",
+    "dev:worker": "wrangler dev --local --port 8787 --env-file .env",
+    "dev:without-turn": "wrangler dev --local --port 8787",
     "build": "tsc -b && vite build",
     "check": "tsc -b",
     "preview": "vite preview",
@@ -22,7 +24,6 @@
     "lucide-react": "^1.31.0",
     "opentype.js": "^2.0.0",
     "overlayscrollbars": "^2.16.0",
-    "peerjs": "^1.5.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-dropzone": "^14.2.3",

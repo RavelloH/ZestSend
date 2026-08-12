@@ -40,6 +40,7 @@ import { LetterCascade } from "../components/ui/letter-cascade";
 import { Signature } from "../components/ui/signature";
 import { TextMorph } from "../components/ui/text-morph";
 import { TextRepel } from "../components/ui/text-repel";
+import { preloadIceServers } from "../lib/webrtc";
 
 type HomeLocale = "en" | "zh";
 type ActivityIcon = "file" | "message" | "screen" | "video" | "voice";
@@ -196,6 +197,7 @@ function ConnectionCodeInput({
   hint,
   links,
   onAboutClick,
+  onComplete,
   onLanguageClick,
   onSettingsClick,
 }: {
@@ -204,12 +206,14 @@ function ConnectionCodeInput({
   hint: string;
   links: readonly string[];
   onAboutClick: () => void;
+  onComplete: (roomId: string) => void;
   onLanguageClick: () => void;
   onSettingsClick: () => void;
 }) {
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const [code, setCode] = useState(() => Array.from({ length }, () => ""));
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
+  const completedRoomRef = useRef<string | null>(null);
 
   const focusAt = useCallback((index: number) => {
     window.requestAnimationFrame(() => {
@@ -221,6 +225,15 @@ function ConnectionCodeInput({
   useEffect(() => {
     focusAt(0);
   }, [focusAt]);
+
+  useEffect(() => {
+    const roomId = code.join("");
+    if (roomId.length === length && completedRoomRef.current !== roomId) {
+      completedRoomRef.current = roomId;
+      onComplete(roomId);
+    }
+    if (roomId.length < length) completedRoomRef.current = null;
+  }, [code, length, onComplete]);
 
   const distributeDigits = useCallback(
     (startIndex: number, rawValue: string) => {
@@ -692,7 +705,12 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
 
   useEffect(() => {
     document.documentElement.lang = copy.language;
-  }, [copy.language]);
+    window.localStorage.setItem("zestsend_locale", locale);
+  }, [copy.language, locale]);
+
+  useEffect(() => {
+    preloadIceServers();
+  }, []);
 
   const handleLanguageSelect = useCallback(
     (nextLocale: HomeLocale) => {
@@ -701,6 +719,13 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
       void navigate({ to: nextLocale === "zh" ? "/zh" : "/en" });
     },
     [locale, navigate],
+  );
+
+  const handleRoomCodeComplete = useCallback(
+    (roomId: string) => {
+      void navigate({ to: "/room/$roomId", params: { roomId } });
+    },
+    [navigate],
   );
 
   return (
@@ -780,6 +805,7 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
             inputLabel={copy.codeInputLabel}
             links={copy.footerLinks}
             onAboutClick={() => setAboutDialogOpen(true)}
+            onComplete={handleRoomCodeComplete}
             onLanguageClick={() => setLanguageDialogOpen(true)}
             onSettingsClick={() => setSettingsDialogOpen(true)}
           />

@@ -4,6 +4,8 @@ dist/
 *.tsbuildinfo
 .next
 .env.local
+.env
+.dev.vars
 .env.development.local
 .env.test.local
 .env.production.local
