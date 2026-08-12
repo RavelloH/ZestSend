@@ -78,8 +78,18 @@ function DockItem({
         return val - center
     })
 
-    // Scale based on distance - closer = larger
-    const scale = useTransform(distance, [-magneticDistance, 0, magneticDistance], [1, maxScale, 1])
+    // Keep edge items inside the viewport while preserving the magnetic curve.
+    const scale = useTransform(distance, (value) => {
+        const normalized = Math.max(0, 1 - Math.abs(value) / magneticDistance)
+        const curveScale = 1 + (maxScale - 1) * normalized
+        const rect = ref.current?.getBoundingClientRect()
+        if (!rect || isVertical || typeof window === "undefined") return curveScale
+
+        const edgeDistance = Math.min(rect.left, window.innerWidth - rect.right)
+        const availableScale = Math.max(1, (edgeDistance * 2 - 8) / Math.max(rect.width, 1))
+        const edgeLimitedScale = Math.min(maxScale, availableScale)
+        return 1 + (curveScale - 1) * ((edgeLimitedScale - 1) / Math.max(maxScale - 1, 1))
+    })
 
     // Apply spring physics for smooth animation
     const springConfig = { damping: 20, stiffness: 300, mass: 0.5 }

@@ -113,6 +113,10 @@ const workspaceCopy = {
     },
     background: "Running in background",
     exit: "Exit room",
+    exitCancel: "Stay in room",
+    exitConfirm: "Exit room",
+    exitDescription: "This will close your end-to-end connection and stop all room activity.",
+    exitTitle: "Leave this room?",
     room: "ROOM",
     statusHint: "All values update from the active connection.",
   },
@@ -129,6 +133,10 @@ const workspaceCopy = {
     },
     background: "正在后台运行",
     exit: "退出房间",
+    exitCancel: "留在房间",
+    exitConfirm: "退出房间",
+    exitDescription: "这将关闭端对端连接，并停止房间内的所有活动。",
+    exitTitle: "确认退出房间？",
     room: "房间",
     statusHint: "所有数值均来自当前活跃连接。",
   },
@@ -336,7 +344,7 @@ function ConnectionDialog({
   return (
     <Dialog open={open} onExitComplete={onExitComplete} onOpenChange={() => undefined}>
       <DialogContent aria-labelledby="connection-title" className="!max-w-2xl">
-        <div className="flex items-center justify-between gap-5 border-b border-white/10 p-6 sm:p-8">
+        <div className="flex flex-col gap-5 border-b border-white/10 p-6 sm:flex-row sm:items-center sm:justify-between sm:p-8">
           <div className="min-w-0">
             <p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.room} {roomId}</p>
             <AutoTransition
@@ -359,10 +367,10 @@ function ConnectionDialog({
               {shareStatus === "copied" ? copy.copied : error ? localizedDetail(locale, error) : copy.preparing(roomId)}
             </AutoTransition>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">
             <button
               aria-label={copy.share}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-white/[0.1] px-3 text-sm font-semibold tracking-[0.04em] text-sky-100/75 transition-colors hover:bg-white/[0.05] hover:text-sky-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60"
+              className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-white/[0.1] px-3 text-sm font-semibold tracking-[0.04em] text-sky-100/75 transition-colors hover:bg-white/[0.05] hover:text-sky-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60 sm:h-10 sm:w-auto"
               onClick={() => void shareRoom()}
               type="button"
             >
@@ -371,7 +379,7 @@ function ConnectionDialog({
             </button>
             <button
               aria-label={copy.leave}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-rose-300/25 bg-rose-500/10 px-3 text-sm font-semibold tracking-[0.04em] text-rose-200 transition-colors hover:bg-rose-500/20 hover:text-rose-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-200/60"
+              className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-rose-300/25 bg-rose-500/10 px-3 text-sm font-semibold tracking-[0.04em] text-rose-200 transition-colors hover:bg-rose-500/20 hover:text-rose-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-200/60 sm:h-10 sm:w-auto"
               onClick={onLeave}
               type="button"
             >
@@ -435,6 +443,23 @@ function RoomWorkspace({
   const { theme } = useTheme();
   const workspace = workspaceCopy[locale];
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId | null>(null);
+  const [isExitDialogOpen, setExitDialogOpen] = useState(false);
+  const [isExiting, setIsExiting] = useState(false);
+  const exitTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (exitTimerRef.current !== null) window.clearTimeout(exitTimerRef.current);
+  }, []);
+
+  const requestExit = () => {
+    if (isExiting) return;
+    setExitDialogOpen(false);
+    setIsExiting(true);
+    exitTimerRef.current = window.setTimeout(() => {
+      exitTimerRef.current = null;
+      onLeave();
+    }, 300);
+  };
   const [runningWorkspaces, setRunningWorkspaces] = useState<WorkspaceId[]>([]);
 
   const activateWorkspace = (workspaceId: WorkspaceId) => {
@@ -457,7 +482,7 @@ function RoomWorkspace({
     icon: <RiLogoutBoxRLine aria-hidden="true" className="size-full" />,
     id: "exit",
     label: workspace.exit,
-    onClick: onLeave,
+    onClick: () => setExitDialogOpen(true),
     tone: "danger",
   });
 
@@ -469,7 +494,11 @@ function RoomWorkspace({
         aria-labelledby="connection-ready-title"
         style={{ height: "100dvh", maxHeight: "none", width: "100dvw" }}
       >
-        <div className="relative flex min-h-full flex-1 flex-col p-5 sm:p-8">
+        <motion.div
+          animate={{ opacity: isExiting ? 0 : 1 }}
+          className="relative flex min-h-full flex-1 flex-col p-5 sm:p-8"
+          transition={{ duration: 0.28, ease: "easeOut" }}
+        >
           <header className="flex items-center justify-between gap-4">
             <div className="flex min-w-0 items-baseline gap-2.5">
               <p
@@ -544,7 +573,7 @@ function RoomWorkspace({
           <div className="pointer-events-none absolute inset-x-0 bottom-6 flex justify-center sm:bottom-8">
             <div
               className="pointer-events-auto origin-bottom"
-              style={{ transform: "scale(clamp(0.46, calc((100vw - 1.5rem) / 41.5rem), 1))" }}
+              style={{ transform: "scale(clamp(0.46, calc((100vw - 1.5rem) / 45rem), 1))" }}
             >
               <MagneticDock
                 activeColor={theme.accent}
@@ -558,7 +587,37 @@ function RoomWorkspace({
               />
             </div>
           </div>
-        </div>
+          <Dialog open={isExitDialogOpen} onOpenChange={setExitDialogOpen}>
+            <DialogContent aria-labelledby="exit-room-title" className="!max-w-md">
+              <div className="p-7 sm:p-8">
+                <RiLogoutBoxRLine aria-hidden="true" className="size-9 text-rose-300" />
+                <h2 id="exit-room-title" className="mt-5 text-2xl font-bold tracking-[0.04em] text-sky-50">
+                  {workspace.exitTitle}
+                </h2>
+                <p className="mt-2 text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/60">
+                  {workspace.exitDescription}
+                </p>
+                <div className="mt-8 grid grid-cols-2 gap-3">
+                  <button
+                    className="inline-flex h-12 w-full items-center justify-center rounded-xl border border-white/10 px-4 text-base font-semibold tracking-[0.04em] text-sky-100/75 transition-colors hover:bg-white/[0.05] hover:text-sky-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60"
+                    onClick={() => setExitDialogOpen(false)}
+                    type="button"
+                  >
+                    {workspace.exitCancel}
+                  </button>
+                  <button
+                    className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-rose-300/25 bg-rose-500/10 px-4 text-base font-semibold tracking-[0.04em] text-rose-200 transition-colors hover:bg-rose-500/20 hover:text-rose-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-200/60"
+                    onClick={requestExit}
+                    type="button"
+                  >
+                    <RiLogoutBoxRLine aria-hidden="true" className="size-4" />
+                    {workspace.exitConfirm}
+                  </button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
+        </motion.div>
       </DialogContent>
     </Dialog>
   );
