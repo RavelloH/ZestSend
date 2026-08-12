@@ -12,11 +12,11 @@ import {
   RiMovieFill,
   RiMusicFill,
   RiPhoneFill,
+  RiCheckLine,
   RiRadarLine,
   RiSettings3Line,
   RiVideoChatFill,
 } from "@remixicon/react";
-import { Check } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   useCallback,
@@ -631,7 +631,7 @@ function LanguageDialog({
                 <span className="text-lg font-bold tracking-[0.04em] sm:text-xl">{option.name}</span>
                 <span className="flex w-full items-center justify-between gap-4 text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/60 sm:text-base">
                   <span>{option.preview}</span>
-                  {selected ? <Check aria-label="Selected" className="size-5 shrink-0" style={{ color: theme.accent }} /> : null}
+                  {selected ? <RiCheckLine aria-label="Selected" className="size-5 shrink-0" style={{ color: theme.accent }} /> : null}
                 </span>
               </button>
             );
@@ -689,7 +689,7 @@ function SettingsDialog({
                   <span className="text-xs font-medium leading-snug tracking-[0.03em] text-sky-100/55">{theme.description[locale]}</span>
                 </span>
                 <span className="flex items-center justify-center">
-                  {selected ? <Check aria-label="Selected" className="size-5" style={{ color: theme.accent }} /> : null}
+                  {selected ? <RiCheckLine aria-label="Selected" className="size-5" style={{ color: theme.accent }} /> : null}
                 </span>
                 <span aria-hidden="true" className="flex">
                   {[theme.deep, theme.mid, theme.highlight].map((color) => (

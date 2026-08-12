@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { RiCloseLine } from "@remixicon/react";
 import {
   createContext,
   forwardRef,
@@ -178,7 +178,7 @@ export const DialogClose = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HT
         type="button"
         {...props}
       >
-        <X aria-hidden="true" className="size-5" />
+        <RiCloseLine aria-hidden="true" className="size-5" />
       </button>
     );
   },
