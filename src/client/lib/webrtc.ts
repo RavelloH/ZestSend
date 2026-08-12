@@ -15,6 +15,8 @@ export type ConnectionProgress = {
   websocket: ConnectionStep;
 };
 
+export type ConnectionRoute = "direct" | "relay";
+
 type SignalMessage = {
   payload?: {
     candidate?: RTCIceCandidateInit;
@@ -34,17 +36,40 @@ type ServerMessage =
 type TurnResponse = { error?: string; iceServers?: RTCIceServer[] };
 type CloudflareIceResponse = TurnResponse & { latency: number };
 
-const GOOGLE_STUN_SERVERS: RTCIceServer[] = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-  { urls: "stun:stun3.l.google.com:19302" },
-  { urls: "stun:stun4.l.google.com:19302" },
+type StunCandidate = {
+  provider: string;
+  server: RTCIceServer;
+};
+
+const PUBLIC_STUN_CANDIDATES: StunCandidate[] = [
+  { provider: "google", server: { urls: "stun:stun.l.google.com:19302" } },
+  { provider: "google", server: { urls: "stun:stun1.l.google.com:19302" } },
+  { provider: "google", server: { urls: "stun:stun2.l.google.com:19302" } },
+  { provider: "google", server: { urls: "stun:stun3.l.google.com:19302" } },
+  { provider: "google", server: { urls: "stun:stun4.l.google.com:19302" } },
+  { provider: "nextcloud", server: { urls: "stun:stun.nextcloud.com:443" } },
+  { provider: "antisip", server: { urls: "stun:stun.antisip.com:3478" } },
+  { provider: "freeswitch", server: { urls: "stun:stun.freeswitch.org:3478" } },
+  { provider: "metered", server: { urls: "stun:stun.relay.metered.ca:80" } },
 ];
 
-type IceProbeResult = { latency: number; server: RTCIceServer } | null;
+type IceProbeResult = { latency: number; provider?: string; server: RTCIceServer } | null;
 
-type IcePreparationResult = {
+export type IceDiagnosticEntry = {
+  detail?: string;
+  kind: "stun" | "turn";
+  latency?: number;
+  provider: string;
+  selected: boolean;
+  state: "ready" | "error";
+  url: string;
+};
+
+export type IcePreparationResult = {
+  completedAt: number;
+  diagnostics: IceDiagnosticEntry[];
+  duration: number;
+  resource: ConnectionStep;
   servers: RTCIceServer[];
   stun: IceProbeResult;
   turn: IceProbeResult;
@@ -80,11 +105,17 @@ function asCandidate(candidate: RTCIceCandidate): RTCIceCandidateInit {
   };
 }
 
+function iceServerUrl(server: RTCIceServer): string {
+  const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+  return urls[0] ?? "Unknown ICE server";
+}
+
 async function probeIceServer(
   server: RTCIceServer,
   candidateType: "srflx" | "relay",
   timeoutMs = 4_500,
-): Promise<{ latency: number; server: RTCIceServer } | null> {
+  provider?: string,
+): Promise<{ latency: number; provider?: string; server: RTCIceServer } | null> {
   const startedAt = performance.now();
   const peer = new RTCPeerConnection({ iceServers: [server] });
   peer.createDataChannel("probe");
@@ -108,7 +139,7 @@ async function probeIceServer(
       await peer.setLocalDescription(offer);
     });
 
-    return discovered ? { server, latency: Math.round(performance.now() - startedAt) } : null;
+    return discovered ? { server, provider, latency: Math.round(performance.now() - startedAt) } : null;
   } catch {
     return null;
   } finally {
@@ -155,7 +186,7 @@ async function fetchCloudflareIceServers(): Promise<CloudflareIceResponse> {
 
 /**
  * Fetches Cloudflare's short-lived ICE credentials once, then concurrently
- * measures Cloudflare and Google STUN candidates plus Cloudflare TURN.
+ * measures Cloudflare and public STUN candidates plus Cloudflare TURN.
  */
 export function prepareIceServers(listener?: IcePreparationListener): Promise<IcePreparationResult> {
   if (listener) {
@@ -165,27 +196,35 @@ export function prepareIceServers(listener?: IcePreparationListener): Promise<Ic
 
   if (!icePreparationPromise) {
     icePreparationPromise = (async () => {
+      const preparationStartedAt = performance.now();
       updateIcePreparation("resource", { state: "checking", detail: "Requesting Cloudflare ICE resources" });
 
       const response = await fetchCloudflareIceServers();
       if (response.error) {
-        updateIcePreparation("resource", { state: "error", detail: response.error, latency: response.latency });
-        updateIcePreparation("stun", { state: "error", detail: "STUN server unavailable" });
-        updateIcePreparation("turn", { state: "error", detail: response.error });
-        return { servers: [], stun: null, turn: null, turnError: response.error };
+        updateIcePreparation("resource", {
+          state: "error",
+          detail: response.error === "TURN credentials are not configured."
+            ? "TURN extension not configured on server"
+            : response.error,
+          latency: response.latency,
+        });
+      } else {
+        updateIcePreparation("resource", {
+          state: "ready",
+          detail: "ICE resources issued by server",
+          latency: response.latency,
+        });
       }
 
       const candidates = response.iceServers ?? [];
-      updateIcePreparation("resource", {
-        state: "ready",
-        detail: "ICE resources issued by server",
-        latency: response.latency,
-      });
       const cloudflareStunCandidates = candidates.filter((server) => {
         const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
         return urls.some((url) => url.startsWith("stun:"));
       });
-      const stunCandidates = [...cloudflareStunCandidates, ...GOOGLE_STUN_SERVERS];
+      const stunCandidates: StunCandidate[] = [
+        ...cloudflareStunCandidates.map((server) => ({ provider: "cloudflare", server })),
+        ...PUBLIC_STUN_CANDIDATES,
+      ];
       const turnCandidates = candidates.filter((server) => {
         const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
         return urls.some((url) => url.startsWith("turn:") || url.startsWith("turns:"));
@@ -195,16 +234,74 @@ export function prepareIceServers(listener?: IcePreparationListener): Promise<Ic
       updateIcePreparation("turn", { state: "checking", detail: "Testing TURN server" });
 
       const [stunResults, turnResults] = await Promise.all([
-        Promise.all(stunCandidates.map((server) => probeIceServer(server, "srflx"))),
+        Promise.all(stunCandidates.map(({ provider, server }) => probeIceServer(server, "srflx", 4_500, provider))),
         Promise.all(turnCandidates.map((server) => probeIceServer(server, "relay"))),
       ]);
       const successfulByLatency = (results: IceProbeResult[]) =>
         results
           .filter((result): result is NonNullable<IceProbeResult> => result !== null)
           .sort((a, b) => a.latency - b.latency);
-      const fastestStunServers = successfulByLatency(stunResults).slice(0, 3);
+      const fastestStunServers = successfulByLatency(stunResults).reduce<NonNullable<IceProbeResult>[]>(
+        (selected, result) => {
+          if (selected.length >= 3 || selected.some((entry) => entry.provider === result.provider)) return selected;
+          selected.push(result);
+          return selected;
+        },
+        [],
+      );
       const stun = fastestStunServers[0] ?? null;
       const turn = successfulByLatency(turnResults)[0] ?? null;
+      const selectedStunServers = new Set(fastestStunServers.map(({ server }) => server));
+      const diagnostics: IceDiagnosticEntry[] = [
+        ...stunResults.map((result, index) => {
+          const candidate = stunCandidates[index];
+          return result
+            ? {
+                kind: "stun" as const,
+                latency: result.latency,
+                provider: candidate.provider,
+                selected: selectedStunServers.has(result.server),
+                state: "ready" as const,
+                url: iceServerUrl(result.server),
+              }
+            : {
+                kind: "stun" as const,
+                provider: candidate.provider,
+                selected: false,
+                state: "error" as const,
+                url: iceServerUrl(candidate.server),
+              };
+        }),
+        ...turnResults.map((result, index) => {
+          const server = turnCandidates[index];
+          return result
+            ? {
+                kind: "turn" as const,
+                latency: result.latency,
+                provider: "cloudflare",
+                selected: result === turn,
+                state: "ready" as const,
+                url: iceServerUrl(result.server),
+              }
+            : {
+                kind: "turn" as const,
+                provider: "cloudflare",
+                selected: false,
+                state: "error" as const,
+                url: iceServerUrl(server),
+              };
+        }),
+      ];
+
+      if (turnCandidates.length === 0) {
+        diagnostics.push({
+          kind: "turn",
+          provider: "cloudflare",
+          selected: false,
+          state: "error",
+          url: "Cloudflare TURN",
+        });
+      }
 
       updateIcePreparation(
         "stun",
@@ -216,10 +313,19 @@ export function prepareIceServers(listener?: IcePreparationListener): Promise<Ic
         "turn",
         turn
           ? { state: "ready", detail: "Available TURN server detected", latency: turn.latency }
-          : { state: "error", detail: "TURN server unavailable" },
+          : {
+              state: "error",
+              detail: response.error === "TURN credentials are not configured."
+                ? "TURN credentials are not configured."
+                : "TURN server unavailable",
+            },
       );
 
       return {
+        completedAt: Date.now(),
+        diagnostics,
+        duration: Math.round(performance.now() - preparationStartedAt),
+        resource: icePreparationSnapshot.resource,
         servers: [...fastestStunServers.map(({ server }) => server), turn?.server].filter(
           (server): server is RTCIceServer => Boolean(server),
         ),
@@ -263,6 +369,7 @@ export class NativeWebRTCSession {
     private readonly onError: (message: string) => void,
     private readonly onRoomFull: () => void,
     private readonly onPeerLeft: () => void,
+    private readonly onConnectionRoute: (route: ConnectionRoute) => void,
   ) {}
 
   connect(): void {
@@ -400,7 +507,10 @@ export class NativeWebRTCSession {
     };
     peer.onconnectionstatechange = () => {
       if (peer.connectionState === "failed") this.fail("P2P connection failed.");
-      if (peer.connectionState === "connected") this.setStep("p2p", { state: "active", detail: "P2P connection established" });
+      if (peer.connectionState === "connected") {
+        this.setStep("p2p", { state: "active", detail: "P2P connection established" });
+        void this.detectConnectionRoute(peer);
+      }
     };
     peer.ondatachannel = ({ channel }) => this.attachDataChannel(channel);
     return peer;
@@ -441,6 +551,7 @@ export class NativeWebRTCSession {
     channel.binaryType = "arraybuffer";
     channel.onopen = () => {
       this.setStep("dataChannel", { state: "active", detail: "Data channel ready" });
+      if (this.peer) void this.detectConnectionRoute(this.peer);
       this.onConnected(this);
     };
     channel.onclose = () => this.handlePeerDisconnect();
@@ -462,6 +573,23 @@ export class NativeWebRTCSession {
     peer?.close();
     this.onError("Data channel failed.");
     this.onPeerLeft();
+  }
+
+  /** Reports the actual selected ICE path, not merely whether TURN credentials exist. */
+  private async detectConnectionRoute(peer: RTCPeerConnection): Promise<void> {
+    try {
+      const stats = await peer.getStats();
+      for (const report of stats.values()) {
+        if (report.type !== "candidate-pair" || report.state !== "succeeded") continue;
+        if (report.selected !== true && report.nominated !== true) continue;
+
+        const localCandidate = report.localCandidateId ? stats.get(report.localCandidateId) : undefined;
+        this.onConnectionRoute(localCandidate?.candidateType === "relay" ? "relay" : "direct");
+        return;
+      }
+    } catch {
+      // Keep the direct label when the browser does not expose candidate statistics.
+    }
   }
 
   private sendSignal(payload: SignalMessage["payload"]): void {

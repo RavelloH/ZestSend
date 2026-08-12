@@ -99,15 +99,15 @@ export function Dialog({
         {open ? (
           <motion.div
             ref={layerRef}
-            animate={{ opacity: 1 }}
+            animate={overlay ? { backgroundColor: "rgba(0, 0, 0, 0.65)", opacity: 1 } : { opacity: 1 }}
             aria-label="Dialog overlay"
             className={cn(
               "fixed inset-0 z-[100] flex items-center justify-center",
               !fullScreen && "p-4 sm:p-8",
-              overlay && "bg-black/65 backdrop-blur-sm",
+              overlay && "backdrop-blur-sm",
             )}
-            exit={{ opacity: 0 }}
-            initial={false}
+            exit={overlay ? { backgroundColor: "rgba(0, 0, 0, 0)", opacity: 0 } : { opacity: 0 }}
+            initial={overlay ? { backgroundColor: "rgba(0, 0, 0, 0)", opacity: 0 } : false}
             onMouseDown={(event) => {
               if (event.target === event.currentTarget) close();
             }}
@@ -130,8 +130,8 @@ export const DialogContent = forwardRef<HTMLDivElement, DialogContentProps>(
       ref={ref}
       animate={fadeOnly ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
       className={cn(
-        "glass zest-dialog-content flex w-full max-w-3xl flex-col overflow-hidden rounded-lg text-gray-100",
-        fullScreen && "fixed inset-0 h-dvh max-h-none w-screen max-w-none rounded-none",
+        "glass zest-dialog-content flex w-full max-w-3xl flex-col overflow-hidden rounded-2xl text-gray-100",
+        fullScreen && "fixed inset-0 h-dvh max-h-none w-screen max-w-none !rounded-none",
         className,
       )}
       exit={fadeOnly ? { opacity: 0 } : { opacity: 0, scale: 0.98, y: 18 }}
@@ -168,7 +168,7 @@ export const DialogClose = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HT
         ref={ref}
         aria-label={ariaLabel}
         className={cn(
-          "inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-white/[0.1] bg-transparent text-sky-100/75 transition-colors hover:bg-white/[0.05] hover:text-sky-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60",
+          "inline-flex size-10 shrink-0 items-center justify-center rounded-xl border border-white/[0.1] bg-transparent text-sky-100/75 transition-colors hover:bg-white/[0.05] hover:text-sky-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60",
           className,
         )}
         onClick={(event) => {

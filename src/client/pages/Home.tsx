@@ -12,6 +12,7 @@ import {
   RiMovieFill,
   RiMusicFill,
   RiPhoneFill,
+  RiRadarLine,
   RiSettings3Line,
   RiVideoChatFill,
 } from "@remixicon/react";
@@ -45,7 +46,7 @@ import {
 import { LetterCascade } from "../components/ui/letter-cascade";
 import { Signature } from "../components/ui/signature";
 import { TextRepel } from "../components/ui/text-repel";
-import { preloadIceServers } from "../lib/webrtc";
+import { prepareIceServers, preloadIceServers, type IceDiagnosticEntry, type IcePreparationResult } from "../lib/webrtc";
 
 type HomeLocale = "en" | "zh";
 type ActivityIcon =
@@ -98,6 +99,24 @@ const homeCopy: Record<
     aboutDialog: {
       close: string;
       description: string;
+      diagnostics: {
+        checking: string;
+        empty: string;
+        failed: string;
+        latency: (latency: number) => string;
+        measurement: string;
+        measuredAt: (time: string) => string;
+        providerCount: (count: number) => string;
+        resource: string;
+        resourceUnavailable: string;
+        supported: string;
+        unsupported: string;
+        selected: string;
+        stun: string;
+        title: string;
+        turn: string;
+        unavailable: string;
+      };
       intro: string;
       title: string;
     };
@@ -124,6 +143,24 @@ const homeCopy: Record<
     aboutDialog: {
       close: "Close about ZestSend",
       description: "An open-source P2P connection tool for secure, private data transfer.",
+      diagnostics: {
+        checking: "Measuring available ICE servers...",
+        empty: "No ICE measurements are available yet.",
+        failed: "ICE measurements could not be completed.",
+        latency: (latency) => `${latency} ms`,
+        measurement: "Measurement",
+        measuredAt: (time) => `Measured ${time}`,
+        providerCount: (count) => `${count} selected STUN providers`,
+        resource: "Cloudflare ICE",
+        resourceUnavailable: "Unavailable",
+        supported: "Supported",
+        unsupported: "Unavailable",
+        selected: "Selected",
+        stun: "STUN",
+        title: "Connection diagnostics",
+        turn: "TURN",
+        unavailable: "Unavailable",
+      },
       intro: "ZestSend is a WebRTC-powered peer-to-peer (P2P) data transfer website that lets you send data securely and privately, without server relays or storage.",
       title: "About ZestSend",
     },
@@ -161,6 +198,24 @@ const homeCopy: Record<
     aboutDialog: {
       close: "关闭关于 ZestSend",
       description: "开源的 P2P 连接工具，提供安全、私密的 P2P 数据传输。",
+      diagnostics: {
+        checking: "正在测速可用的 ICE 服务器...",
+        empty: "尚无可用的 ICE 测速结果。",
+        failed: "ICE 服务器测速未能完成。",
+        latency: (latency) => `${latency} ms`,
+        measurement: "测速",
+        measuredAt: (time) => `测速于 ${time}`,
+        providerCount: (count) => `已选用 ${count} 家 STUN 供应商`,
+        resource: "Cloudflare ICE",
+        resourceUnavailable: "不可用",
+        supported: "支持",
+        unsupported: "不可用",
+        selected: "已选用",
+        stun: "STUN",
+        title: "连接诊断",
+        turn: "TURN",
+        unavailable: "不可用",
+      },
       intro: "ZestSend 是一个基于 WebRTC 的点对点（P2P）数据传输网站，支持安全、私密地传输数据，无需通过服务器中转或存储。",
       title: "关于 ZestSend",
     },
@@ -653,10 +708,12 @@ function SettingsDialog({
 function AboutDialog({
   locale,
   onOpenChange,
+  onDiagnosticsClick,
   open,
 }: {
   locale: HomeLocale;
   onOpenChange: (open: boolean) => void;
+  onDiagnosticsClick: () => void;
   open: boolean;
 }) {
   const copy = homeCopy[locale].aboutDialog;
@@ -677,15 +734,26 @@ function AboutDialog({
         </DialogHeader>
         <div className="space-y-7 p-5 text-sm leading-relaxed text-sky-100/75 sm:p-6 sm:text-base">
           <p>{copy.intro}</p>
-          <a
-            className="inline-flex w-fit items-center gap-2 font-semibold text-sky-100 transition-colors hover:text-white"
-            href="https://github.com/ravelloh/zestsend"
-            rel="noreferrer"
-            target="_blank"
-          >
-            <RiGithubFill aria-hidden="true" className="size-5" />
-            RavelloH/ZestSend
-          </a>
+          <div className="flex w-full items-center gap-4">
+            <a
+              className="inline-flex w-fit items-center gap-2 font-semibold text-sky-100 transition-colors hover:text-white"
+              href="https://github.com/ravelloh/zestsend"
+              rel="noreferrer"
+              target="_blank"
+            >
+              <RiGithubFill aria-hidden="true" className="size-5" />
+              RavelloH/ZestSend
+            </a>
+            <button
+              aria-label={copy.diagnostics.title}
+              className="ml-auto inline-flex shrink-0 items-center gap-2 text-sm font-semibold text-sky-100/70 transition-colors hover:text-sky-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60"
+              onClick={onDiagnosticsClick}
+              type="button"
+            >
+              <RiRadarLine aria-hidden="true" className="size-5" />
+              <span>{copy.diagnostics.title}</span>
+            </button>
+          </div>
           <div className="border-t border-white/10 pt-10 sm:pt-12">
             <a
               aria-label="Visit RavelloH"
@@ -710,12 +778,121 @@ function AboutDialog({
   );
 }
 
+function DiagnosticsDialog({
+  locale,
+  onOpenChange,
+  open,
+}: {
+  locale: HomeLocale;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
+}) {
+  const copy = homeCopy[locale].aboutDialog;
+  const [preparation, setPreparation] = useState<IcePreparationResult | null>(null);
+  const [failed, setFailed] = useState(false);
+  const groups: Array<{ kind: IceDiagnosticEntry["kind"]; label: string }> = [
+    { kind: "stun", label: copy.diagnostics.stun },
+    { kind: "turn", label: copy.diagnostics.turn },
+  ];
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setFailed(false);
+    void prepareIceServers()
+      .then((result) => {
+        if (active) setPreparation(result);
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [open]);
+
+  const diagnostics = preparation?.diagnostics ?? null;
+  const selectedProviderCount = diagnostics
+    ? new Set(diagnostics.filter((entry) => entry.kind === "stun" && entry.selected).map((entry) => entry.provider)).size
+    : 0;
+  const webRtcSupported = typeof RTCPeerConnection !== "undefined" && typeof RTCDataChannel !== "undefined";
+  const measuredAt = preparation
+    ? new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(preparation.completedAt)
+    : null;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent aria-labelledby="diagnostics-dialog-title" className="!max-w-2xl">
+        <div className="flex min-w-0 flex-col">
+          <DialogHeader className="w-full p-5 sm:p-6">
+            <div>
+              <DialogTitle id="diagnostics-dialog-title" className="text-xl sm:text-2xl">{copy.diagnostics.title}</DialogTitle>
+              <DialogDescription className="mt-1 text-xs sm:text-sm">
+                {failed
+                  ? copy.diagnostics.failed
+                  : diagnostics === null
+                    ? copy.diagnostics.checking
+                    : diagnostics.length === 0
+                      ? copy.diagnostics.empty
+                      : `${diagnostics.filter((entry) => entry.kind === "stun").length} ${copy.diagnostics.stun} · ${diagnostics.filter((entry) => entry.kind === "turn").length} ${copy.diagnostics.turn}`}
+              </DialogDescription>
+            </div>
+            <DialogClose aria-label={copy.close} data-dialog-autofocus />
+          </DialogHeader>
+          {diagnostics && diagnostics.length > 0 && preparation ? (
+            <div className="w-full divide-y divide-white/10 px-5 pb-5 sm:px-6 sm:pb-6">
+              <section className="grid grid-cols-2 gap-x-6 gap-y-3 py-4 text-xs font-mono sm:grid-cols-3">
+                <div className="min-w-0">
+                  <p className="text-[0.65rem] font-bold uppercase tracking-[0.14em] text-sky-100/45">{copy.diagnostics.resource}</p>
+                  <p className={`mt-1 truncate ${preparation.resource.state === "ready" ? "text-emerald-300" : "text-amber-300"}`}>
+                    {preparation.resource.latency !== undefined ? copy.diagnostics.latency(preparation.resource.latency) : copy.diagnostics.resourceUnavailable}
+                  </p>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[0.65rem] font-bold uppercase tracking-[0.14em] text-sky-100/45">{copy.diagnostics.measurement}</p>
+                  <p className="mt-1 truncate text-sky-100/70">{preparation.duration} ms</p>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[0.65rem] font-bold uppercase tracking-[0.14em] text-sky-100/45">WebRTC / DataChannel</p>
+                  <p className={`mt-1 truncate ${webRtcSupported ? "text-emerald-300" : "text-amber-300"}`}>{webRtcSupported ? copy.diagnostics.supported : copy.diagnostics.unsupported}</p>
+                </div>
+                <p className="col-span-2 truncate text-sky-100/55 sm:col-span-3">{copy.diagnostics.providerCount(selectedProviderCount)}</p>
+                {measuredAt ? <p className="col-span-2 truncate text-sky-100/55 sm:col-span-3">{copy.diagnostics.measuredAt(measuredAt)}</p> : null}
+              </section>
+              {groups.map((group) => {
+                const entries = diagnostics.filter((entry) => entry.kind === group.kind);
+                if (entries.length === 0) return null;
+                return (
+                  <section key={group.kind} className="py-4 first:pt-0 last:pb-0" aria-label={group.label}>
+                    <p className="mb-3 text-[0.65rem] font-bold uppercase tracking-[0.16em] text-sky-100/45">{group.label}</p>
+                    <div className="space-y-2">
+                      {entries.map((entry) => (
+                        <div key={`${entry.kind}-${entry.provider}-${entry.url}`} className="flex items-center gap-3 font-mono text-xs sm:text-sm">
+                          <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${entry.state === "ready" ? "bg-emerald-300" : "bg-amber-300"}`} />
+                          <span className="min-w-0 flex-1 truncate font-medium text-sky-100/70">{entry.provider} · {entry.url}</span>
+                          {entry.selected ? <span className="shrink-0 text-emerald-300">{copy.diagnostics.selected}</span> : null}
+                          <span className="shrink-0 text-sky-100/60">{entry.latency !== undefined ? copy.diagnostics.latency(entry.latency) : copy.diagnostics.unavailable}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
   const copy = homeCopy[locale];
   const morphActivities = useMemo(() => shuffled(copy.activities), [copy.activities]);
   const [isAboutDialogOpen, setAboutDialogOpen] = useState(false);
   const [isLanguageDialogOpen, setLanguageDialogOpen] = useState(false);
   const [isSettingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [isDiagnosticsDialogOpen, setDiagnosticsDialogOpen] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -827,8 +1004,17 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
         />
         <AboutDialog
           locale={locale}
+          onDiagnosticsClick={() => {
+            setAboutDialogOpen(false);
+            setDiagnosticsDialogOpen(true);
+          }}
           onOpenChange={setAboutDialogOpen}
           open={isAboutDialogOpen}
+        />
+        <DiagnosticsDialog
+          locale={locale}
+          onOpenChange={setDiagnosticsDialogOpen}
+          open={isDiagnosticsDialogOpen}
         />
       </section>
     </Layout>

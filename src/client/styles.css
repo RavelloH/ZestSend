@@ -20,12 +20,31 @@ body {
   --zest-scrollbar-thumb: #67d5ff;
 }
 
+.animate-gradient {
+  background-size: 400% 400%;
+  animation: zest-gradient 15s ease infinite;
+  transform: translateZ(0);
+  will-change: background-position;
+}
+
+@keyframes zest-gradient {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
 .glass {
   border: 1px solid rgb(255 255 255 / 0.1);
   background-color: rgb(0 0 0 / 0.5);
   box-shadow: 0 16px 48px rgb(0 0 0 / 0.48);
   backdrop-filter: blur(40px);
   -webkit-backdrop-filter: blur(40px);
+  border-radius: 1rem;
 }
 
 * {
