@@ -252,7 +252,9 @@ export class NativeWebRTCSession {
   private readyForPeerConnection = false;
   private selectedServers: RTCIceServer[] = [];
   private socket: WebSocket | null = null;
-  private socketPingStartedAt = 0;
+  private socketPingStartedAt: number | null = null;
+  private socketPingTimer: number | undefined;
+  private socketPingTimeout: number | undefined;
 
   constructor(
     private readonly roomId: string,
@@ -265,13 +267,13 @@ export class NativeWebRTCSession {
     this.setStep("websocket", { state: "checking", detail: "Opening signaling socket" });
     this.socket = new WebSocket(websocketUrl(this.roomId));
     this.socket.addEventListener("open", () => {
-      this.socketPingStartedAt = performance.now();
-      this.sendSocket({ type: "ping" });
+      this.startSocketLatencyProbe();
       void this.prepareIceServers();
     });
     this.socket.addEventListener("message", (event) => this.handleSocketMessage(String(event.data)));
     this.socket.addEventListener("error", () => this.fail("The signaling WebSocket could not be opened."));
     this.socket.addEventListener("close", () => {
+      this.stopSocketLatencyProbe();
       if (!this.closed && this.progress.dataChannel.state !== "active") {
         this.setStep("websocket", { state: "error", detail: "Signaling socket closed" });
       }
@@ -280,6 +282,7 @@ export class NativeWebRTCSession {
 
   close(): void {
     this.closed = true;
+    this.stopSocketLatencyProbe();
     this.channel?.close();
     this.peer?.close();
     this.socket?.close();
@@ -325,10 +328,17 @@ export class NativeWebRTCSession {
     }
 
     if (message.type === "pong") {
+      if (this.socketPingStartedAt === null) return;
+      const latency = Math.round(performance.now() - this.socketPingStartedAt);
+      this.socketPingStartedAt = null;
+      if (this.socketPingTimeout !== undefined) {
+        window.clearTimeout(this.socketPingTimeout);
+        this.socketPingTimeout = undefined;
+      }
       this.setStep("websocket", {
         state: "active",
         detail: "Signaling socket connected",
-        latency: Math.round(performance.now() - this.socketPingStartedAt),
+        latency,
       });
       return;
     }
@@ -426,6 +436,40 @@ export class NativeWebRTCSession {
 
   private sendSignal(payload: SignalMessage["payload"]): void {
     this.sendSocket({ type: "signal", payload });
+  }
+
+  private startSocketLatencyProbe(): void {
+    this.measureSocketLatency();
+    this.socketPingTimer = window.setInterval(() => this.measureSocketLatency(), 5_000);
+  }
+
+  private stopSocketLatencyProbe(): void {
+    if (this.socketPingTimer !== undefined) {
+      window.clearInterval(this.socketPingTimer);
+      this.socketPingTimer = undefined;
+    }
+    if (this.socketPingTimeout !== undefined) {
+      window.clearTimeout(this.socketPingTimeout);
+      this.socketPingTimeout = undefined;
+    }
+    this.socketPingStartedAt = null;
+  }
+
+  private measureSocketLatency(): void {
+    if (
+      this.closed ||
+      this.socketPingStartedAt !== null ||
+      this.socket?.readyState !== WebSocket.OPEN
+    ) {
+      return;
+    }
+
+    this.socketPingStartedAt = performance.now();
+    this.sendSocket({ type: "ping" });
+    this.socketPingTimeout = window.setTimeout(() => {
+      this.socketPingStartedAt = null;
+      this.socketPingTimeout = undefined;
+    }, 5_000);
   }
 
   private sendSocket(message: object): void {

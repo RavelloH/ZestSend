@@ -15,6 +15,7 @@
     "deploy": "pnpm run build && wrangler deploy"
   },
   "dependencies": {
+    "@number-flow/react": "^0.6.2",
     "@remixicon/react": "^4.9.0",
     "@tanstack/react-router": "^1.170.25",
     "clsx": "^2.1.1",

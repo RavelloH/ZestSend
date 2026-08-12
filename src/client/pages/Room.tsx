@@ -9,6 +9,7 @@ import {
   RiLogoutBoxRLine,
   RiWifiLine,
 } from "@remixicon/react";
+import NumberFlow, { continuous } from "@number-flow/react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
@@ -27,6 +28,8 @@ type StatusRowProps = {
   label: string;
   status: ConnectionProgress[keyof ConnectionProgress];
 };
+
+const continuousNumberFlow = [continuous];
 
 type RoomLocale = "en" | "zh";
 
@@ -153,7 +156,7 @@ function StatusRow({ icon: Icon, label, locale, nonBlockingFailure = false, real
         <AnimatePresence initial={false}>
           {working ? (
             <motion.span
-              animate={{ opacity: 1, scale: 1 }}
+              animate={{ opacity: 1, scale: 1.1 }}
               aria-hidden="true"
               className="absolute size-12 rounded-full"
               exit={{ opacity: 0, scale: 0.82 }}
@@ -197,7 +200,19 @@ function StatusRow({ icon: Icon, label, locale, nonBlockingFailure = false, real
       </motion.div>
       <div className="relative min-w-0 flex-1 self-stretch pr-14">
         <p className="min-w-0 truncate text-base font-bold tracking-[0.04em] text-sky-50 sm:text-lg">{label}</p>
-        {status.latency !== undefined ? <span className={`absolute right-0 top-1/2 -translate-y-1/2 font-mono text-sm ${latencyColor(status.latency, realtimeConnection)}`}>{status.latency}ms</span> : null}
+        {status.latency !== undefined ? (
+          <span className={`absolute right-0 top-1/2 inline-flex -translate-y-1/2 items-center font-mono text-sm leading-none ${latencyColor(status.latency, realtimeConnection)}`}>
+            <NumberFlow
+              className="inline-flex leading-none"
+              plugins={continuousNumberFlow}
+              spinTiming={{ duration: 420, easing: "ease-out" }}
+              transformTiming={{ duration: 420, easing: "ease-out" }}
+              value={status.latency}
+              willChange
+            />
+            <span className="ml-px inline-flex items-center leading-none">ms</span>
+          </span>
+        ) : null}
         <AutoTransition
           className="mt-1 truncate text-sm font-medium tracking-[0.03em] text-sky-100/55"
           duration={0.22}

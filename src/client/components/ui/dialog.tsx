@@ -95,7 +95,7 @@ export function Dialog({
             ref={layerRef}
             animate={{ opacity: 1 }}
             aria-label="Dialog overlay"
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm sm:p-8"
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm sm:p-8"
             exit={{ opacity: 0 }}
             initial={{ opacity: 0 }}
             onMouseDown={(event) => {

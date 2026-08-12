@@ -1,14 +1,19 @@
 import {
   RiCastFill,
+  RiBrushFill,
   RiFileFill,
+  RiFolderSharedFill,
   RiGithubFill,
   RiGlobalLine,
   RiInformationLine,
   RiLock2Fill,
+  RiMarkdownFill,
   RiMessage3Fill,
+  RiMovieFill,
+  RiMusicFill,
   RiPhoneFill,
   RiSettings3Line,
-  RiVideoOnFill,
+  RiVideoChatFill,
 } from "@remixicon/react";
 import { Check } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
@@ -26,6 +31,7 @@ import { motion } from "framer-motion";
 import Layout from "../components/Layout";
 import { appThemes, useTheme } from "../components/theme";
 import { CursorDrivenParticleTypography } from "../components/ui/cursor-driven-particle-typography";
+import { AutoResizer } from "../components/ui/auto-resizer";
 import { AutoTransition } from "../components/ui/auto-transition";
 import { Clickable } from "../components/ui/clickable";
 import {
@@ -38,20 +44,34 @@ import {
 } from "../components/ui/dialog";
 import { LetterCascade } from "../components/ui/letter-cascade";
 import { Signature } from "../components/ui/signature";
-import { TextMorph } from "../components/ui/text-morph";
 import { TextRepel } from "../components/ui/text-repel";
 import { preloadIceServers } from "../lib/webrtc";
 
 type HomeLocale = "en" | "zh";
-type ActivityIcon = "file" | "message" | "screen" | "video" | "voice";
+type ActivityIcon =
+  | "chat"
+  | "file"
+  | "screen"
+  | "video"
+  | "voice"
+  | "watch"
+  | "write"
+  | "draw"
+  | "folder"
+  | "music";
 type Activity = { word: string; icon: ActivityIcon };
 
 const activityIcons = {
+  chat: RiMessage3Fill,
   file: RiFileFill,
-  message: RiMessage3Fill,
   screen: RiCastFill,
-  video: RiVideoOnFill,
+  video: RiVideoChatFill,
   voice: RiPhoneFill,
+  watch: RiMovieFill,
+  write: RiMarkdownFill,
+  draw: RiBrushFill,
+  folder: RiFolderSharedFill,
+  music: RiMusicFill,
 };
 
 const homeCopy: Record<
@@ -108,19 +128,16 @@ const homeCopy: Record<
       title: "About ZestSend",
     },
     activities: [
-      { word: "share files", icon: "file" },
+      { word: "chat in real time", icon: "chat" },
       { word: "send files", icon: "file" },
-      { word: "receive files", icon: "file" },
-      { word: "share messages", icon: "message" },
-      { word: "send messages", icon: "message" },
-      { word: "receive messages", icon: "message" },
       { word: "share your screen", icon: "screen" },
-      { word: "send a screen share", icon: "screen" },
-      { word: "receive a screen share", icon: "screen" },
       { word: "make a video call", icon: "video" },
-      { word: "receive a video call", icon: "video" },
-      { word: "make a voice call", icon: "voice" },
-      { word: "receive a voice call", icon: "voice" },
+      { word: "talk anytime", icon: "voice" },
+      { word: "watch videos together", icon: "watch" },
+      { word: "write together", icon: "write" },
+      { word: "draw together", icon: "draw" },
+      { word: "share a folder", icon: "folder" },
+      { word: "listen together", icon: "music" },
     ],
   },
   zh: {
@@ -148,19 +165,16 @@ const homeCopy: Record<
       title: "关于 ZestSend",
     },
     activities: [
-      { word: "共享文件", icon: "file" },
-      { word: "发送文件", icon: "file" },
-      { word: "接收文件", icon: "file" },
-      { word: "共享消息", icon: "message" },
-      { word: "发送消息", icon: "message" },
-      { word: "接收消息", icon: "message" },
+      { word: "畅聊", icon: "chat" },
+      { word: "传文件", icon: "file" },
       { word: "共享屏幕", icon: "screen" },
-      { word: "发送屏幕共享", icon: "screen" },
-      { word: "接收屏幕共享", icon: "screen" },
       { word: "发起视频通话", icon: "video" },
-      { word: "接收视频通话", icon: "video" },
-      { word: "发起语音通话", icon: "voice" },
-      { word: "接收语音通话", icon: "voice" },
+      { word: "语音通话", icon: "voice" },
+      { word: "一起追剧看电影", icon: "watch" },
+      { word: "共同协作", icon: "write" },
+      { word: "一起涂鸦", icon: "draw" },
+      { word: "分享整个文件夹", icon: "folder" },
+      { word: "同步听一首歌", icon: "music" },
     ],
   },
 };
@@ -174,20 +188,37 @@ function shuffled<T>(values: readonly T[]) {
   return result;
 }
 
-function ActivityIcon({ icon }: { icon: ActivityIcon }) {
-  const Icon = activityIcons[icon];
+function ActivityTransition({ activities }: { activities: readonly Activity[] }) {
+  const [activityIndex, setActivityIndex] = useState(0);
+  const activity = activities[activityIndex] ?? activities[0];
+
+  useEffect(() => {
+    setActivityIndex(0);
+    if (activities.length < 2) return;
+
+    const timer = window.setInterval(() => {
+      setActivityIndex((index) => (index + 1) % activities.length);
+    }, 2_400);
+
+    return () => window.clearInterval(timer);
+  }, [activities]);
+
+  if (!activity) return null;
+  const Icon = activityIcons[activity.icon];
 
   return (
-    <AutoTransition
-      as="span"
-      aria-hidden="true"
-      className="inline-flex shrink-0 self-center"
-      duration={0.34}
-      type="fade"
-      transitionKey={icon}
-    >
-      <Icon className="size-[0.9em]" />
-    </AutoTransition>
+    <AutoResizer animateHeight={false} animateWidth duration={0.38} className="inline-flex !bg-transparent align-middle">
+      <AutoTransition
+        as="span"
+        className="inline-flex !bg-transparent items-center gap-1.5 py-[0.08em] whitespace-nowrap sm:gap-3"
+        duration={0.38}
+        transitionKey={activity.word}
+        type="fade"
+      >
+        <span>{activity.word}</span>
+        <Icon aria-hidden="true" className="size-[0.9em] shrink-0" />
+      </AutoTransition>
+    </AutoResizer>
   );
 }
 
@@ -590,7 +621,7 @@ function SettingsDialog({
               <button
                 key={theme.id}
                 aria-pressed={selected}
-                className={`relative flex h-24 items-center px-5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-sky-100/60 sm:px-6 ${
+                className={`relative grid min-h-24 grid-cols-[minmax(0,1fr)_1.5rem_6rem] items-stretch text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-sky-100/60 sm:grid-cols-[minmax(0,1fr)_1.5rem_9rem] ${
                   selected ? "text-sky-50" : "text-sky-50 hover:bg-white/[0.04]"
                 }`}
                 onClick={() => setThemeId(theme.id)}
@@ -598,12 +629,14 @@ function SettingsDialog({
                 type="button"
               >
                 {selected ? <span aria-hidden="true" className="absolute inset-y-0 left-0 w-0.5" style={{ backgroundColor: theme.accent }} /> : null}
-                <span className="flex min-w-0 flex-col gap-0.5 pr-44">
+                <span className="flex min-w-0 flex-col justify-center gap-0.5 px-5 py-4 sm:px-6">
                   <span className="text-base font-bold tracking-[0.04em] sm:text-lg">{theme.name[locale]}</span>
                   <span className="text-xs font-medium leading-snug tracking-[0.03em] text-sky-100/55">{theme.description[locale]}</span>
                 </span>
-                {selected ? <Check aria-label="Selected" className="absolute right-40 top-1/2 size-5 -translate-y-1/2" style={{ color: theme.accent }} /> : null}
-                <span aria-hidden="true" className="absolute inset-y-0 right-0 flex">
+                <span className="flex items-center justify-center">
+                  {selected ? <Check aria-label="Selected" className="size-5" style={{ color: theme.accent }} /> : null}
+                </span>
+                <span aria-hidden="true" className="flex">
                   {[theme.deep, theme.mid, theme.highlight].map((color) => (
                     <span key={color} className="h-full aspect-[1/2]" style={{ backgroundColor: color }} />
                   ))}
@@ -680,28 +713,10 @@ function AboutDialog({
 export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
   const copy = homeCopy[locale];
   const morphActivities = useMemo(() => shuffled(copy.activities), [copy.activities]);
-  const morphWords = useMemo(
-    () => morphActivities.map((activity) => activity.word),
-    [morphActivities],
-  );
-  const prefixWords = useMemo(() => [copy.prefix], [copy.prefix]);
-  const [activeActivity, setActiveActivity] = useState(morphActivities[0]!);
   const [isAboutDialogOpen, setAboutDialogOpen] = useState(false);
   const [isLanguageDialogOpen, setLanguageDialogOpen] = useState(false);
   const [isSettingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const navigate = useNavigate();
-
-  useEffect(() => {
-    setActiveActivity(morphActivities[0]!);
-  }, [morphActivities]);
-
-  const handleActivityChange = useCallback(
-    (word: string) => {
-      const activity = morphActivities.find((candidate) => candidate.word === word);
-      if (activity) setActiveActivity(activity);
-    },
-    [morphActivities],
-  );
 
   useEffect(() => {
     document.documentElement.lang = copy.language;
@@ -743,7 +758,7 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
             className="h-full !min-h-0"
           />
         </div>
-        <div className="absolute inset-x-0 top-[calc(50%_-_1rem)] flex min-h-[7.5rem] flex-col items-center justify-center px-3 text-center text-[clamp(0.72rem,4.2vw,3rem)] font-bold leading-[1.15] tracking-[0.02em] text-slate-100 [text-shadow:0_2px_26px_rgba(2,6,23,0.9)] sm:top-[calc(50%_-_7rem)] sm:px-6 sm:tracking-[0.08em]">
+        <div className="absolute inset-x-0 top-[calc(50%_-_1rem)] flex min-h-[7.5rem] flex-col items-center justify-center px-3 text-center text-[clamp(0.72rem,4.2vw,3rem)] font-bold leading-[1.15] tracking-[0.02em] text-slate-100 sm:top-[calc(50%_-_7rem)] sm:px-6 sm:tracking-[0.08em]">
           {locale === "zh" ? (
             <>
               <div className="flex items-center justify-center gap-1.5 whitespace-nowrap sm:gap-3">
@@ -759,31 +774,17 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
                 />
                 <span>的</span>
               </div>
-              <p className="mt-2 inline-flex items-center justify-center gap-1.5 whitespace-nowrap text-sky-100 sm:gap-3">
-                <TextMorph words={prefixWords} interval={2400} morphDuration={680} className="leading-[1.15]" />
-                <TextMorph
-                  words={morphWords}
-                  interval={2400}
-                  morphDuration={680}
-                  className="leading-[1.15]"
-                  onMorphStart={handleActivityChange}
-                />
-                <ActivityIcon icon={activeActivity.icon} />
-              </p>
+              <div className="mt-2 flex items-center justify-center gap-1.5 whitespace-nowrap text-sky-100 sm:gap-3">
+                <span>{copy.prefix}</span>
+                <ActivityTransition activities={morphActivities} />
+              </div>
             </>
           ) : (
             <>
-              <p className="inline-flex items-center justify-center gap-1.5 whitespace-nowrap text-sky-100 sm:gap-3">
-                <TextMorph words={prefixWords} interval={2400} morphDuration={680} className="leading-[1.15]" />
-                <TextMorph
-                  words={morphWords}
-                  interval={2400}
-                  morphDuration={680}
-                  className="leading-[1.15]"
-                  onMorphStart={handleActivityChange}
-                />
-                <ActivityIcon icon={activeActivity.icon} />
-              </p>
+              <div className="flex items-center justify-center gap-1.5 whitespace-nowrap text-sky-100 sm:gap-3">
+                <span>{copy.prefix}</span>
+                <ActivityTransition activities={morphActivities} />
+              </div>
               <div className="mt-2 flex items-center justify-center gap-1.5 whitespace-nowrap sm:gap-3">
                 <span>with</span>
                 <TextRepel
