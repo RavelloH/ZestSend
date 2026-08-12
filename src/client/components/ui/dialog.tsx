@@ -35,6 +35,7 @@ export function Dialog({
   onOpenChange,
   onExitComplete,
   open,
+  transitionDuration = 0.26,
 }: {
   children: ReactNode;
   fullScreen?: boolean;
@@ -42,6 +43,7 @@ export function Dialog({
   onOpenChange: (open: boolean) => void;
   onExitComplete?: () => void;
   open: boolean;
+  transitionDuration?: number;
 }) {
   const layerRef = useRef<HTMLDivElement>(null);
 
@@ -111,7 +113,7 @@ export function Dialog({
             onMouseDown={(event) => {
               if (event.target === event.currentTarget) close();
             }}
-            transition={{ duration: 0.26, ease: "easeOut" }}
+            transition={{ duration: transitionDuration, ease: "easeOut" }}
           >
             {children}
           </motion.div>
@@ -122,10 +124,14 @@ export function Dialog({
   );
 }
 
-type DialogContentProps = HTMLMotionProps<"div"> & { fadeOnly?: boolean; fullScreen?: boolean };
+type DialogContentProps = HTMLMotionProps<"div"> & {
+  fadeDuration?: number;
+  fadeOnly?: boolean;
+  fullScreen?: boolean;
+};
 
 export const DialogContent = forwardRef<HTMLDivElement, DialogContentProps>(
-  ({ className, children, fadeOnly = false, fullScreen = false, ...props }, ref) => (
+  ({ className, children, fadeDuration = 0.24, fadeOnly = false, fullScreen = false, ...props }, ref) => (
     <motion.div
       ref={ref}
       animate={fadeOnly ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
@@ -137,7 +143,7 @@ export const DialogContent = forwardRef<HTMLDivElement, DialogContentProps>(
       exit={fadeOnly ? { opacity: 0 } : { opacity: 0, scale: 0.98, y: 18 }}
       initial={fadeOnly ? { opacity: 0 } : { opacity: 0, scale: 0.98, y: 18 }}
       role="dialog"
-      transition={fadeOnly ? { duration: 0.24, ease: "easeOut" } : { type: "spring", stiffness: 380, damping: 32, mass: 0.8 }}
+      transition={fadeOnly ? { duration: fadeDuration, ease: "easeOut" } : { type: "spring", stiffness: 380, damping: 32, mass: 0.8 }}
       {...props}
     >
       <OverlayScrollbar className="min-h-0 flex-1 overscroll-contain">{children as ReactNode}</OverlayScrollbar>

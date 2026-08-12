@@ -106,7 +106,11 @@ function DockItem({
         <motion.button
             ref={ref}
             aria-label={item.label}
-            onClick={item.onClick}
+            onClick={(event) => {
+                item.onClick?.()
+                // Pointer clicks should not leave focus on the dock; keyboard focus remains available.
+                if (event.detail !== 0) event.currentTarget.blur()
+            }}
             onMouseEnter={() => setIsHovered(true)}
             onMouseLeave={() => setIsHovered(false)}
             className={cn(
@@ -163,11 +167,10 @@ function DockItem({
                             "absolute -top-1 -right-1",
                             "min-w-[20px] h-5 px-1.5",
                             "rounded-full",
-                            "bg-red-500",
-                            "text-white text-xs font-semibold",
+                            "bg-red-500/65",
+                            "text-red-50 text-xs font-semibold",
                             "flex items-center justify-center",
-                            "border-2 border-black/50",
-                            "shadow-lg"
+                            "shadow-sm shadow-rose-950/20"
                         )}
                     >
                         {item.badge > 99 ? "99+" : item.badge}

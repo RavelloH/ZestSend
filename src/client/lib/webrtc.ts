@@ -1,9 +1,14 @@
 export type ConnectionState = "pending" | "checking" | "ready" | "active" | "error";
 
 export type ConnectionStep = {
+  channels?: number;
   detail: string;
   latency?: number;
   state: ConnectionState;
+  transferred?: {
+    received: number;
+    sent: number;
+  };
 };
 
 export type ConnectionProgress = {
@@ -24,6 +29,60 @@ type SignalMessage = {
   };
   type: "signal";
 };
+
+type DataChannelPingMessage = {
+  id: string;
+  type: "zestsend-ping" | "zestsend-pong";
+};
+
+type ChatReceiptStatus = "received" | "read";
+
+type ChatReceiptMessage = {
+  id: string;
+  type: "chat-received" | "chat-read";
+};
+
+type ChatTypingMessage = {
+  type: "chat-typing";
+};
+
+type DataChannelControlMessage = DataChannelPingMessage | ChatReceiptMessage | ChatTypingMessage;
+
+export type InteractiveMessage = {
+  id: string;
+  text: string;
+  type: "chat";
+};
+
+type DataChannelName = "bulk" | "control" | "interactive";
+
+const DATA_CHANNEL_NAMES: DataChannelName[] = ["control", "interactive", "bulk"];
+const DATA_CHANNEL_COUNT = DATA_CHANNEL_NAMES.length;
+const textEncoder = new TextEncoder();
+
+function isDataChannelName(label: string): label is DataChannelName {
+  return DATA_CHANNEL_NAMES.includes(label as DataChannelName);
+}
+
+function isInteractiveMessage(value: unknown): value is InteractiveMessage {
+  if (!value || typeof value !== "object") return false;
+  const message = value as Partial<InteractiveMessage>;
+  return message.type === "chat"
+    && typeof message.id === "string"
+    && message.id.length > 0
+    && message.id.length <= 128
+    && typeof message.text === "string"
+    && message.text.length > 0
+    && message.text.length <= 4_000;
+}
+
+function dataSize(data: unknown): number {
+  if (typeof data === "string") return textEncoder.encode(data).byteLength;
+  if (data instanceof Blob) return data.size;
+  if (data instanceof ArrayBuffer) return data.byteLength;
+  if (ArrayBuffer.isView(data)) return data.byteLength;
+  return 0;
+}
 
 type ServerMessage =
   | { isInitiator: boolean; peerCount: number; peerId: string; type: "welcome" }
@@ -76,6 +135,10 @@ export type IcePreparationResult = {
   turnError?: string;
 };
 
+type IceConnectionPreparationResult = {
+  servers: RTCIceServer[];
+};
+
 type IcePreparationStep = "resource" | "stun" | "turn";
 type IcePreparationListener = (step: IcePreparationStep, status: ConnectionStep) => void;
 
@@ -87,7 +150,7 @@ const initialProgress = (): ConnectionProgress => ({
   stun: pendingStep("Checking STUN server"),
   turn: pendingStep("Checking TURN server"),
   p2p: pendingStep("Waiting for the other participant to join the room"),
-  dataChannel: pendingStep("Waiting for data channel"),
+  dataChannel: { channels: 0, ...pendingStep("Waiting for data channel"), transferred: { received: 0, sent: 0 } },
 });
 
 function websocketUrl(roomId: string): string {
@@ -148,6 +211,8 @@ async function probeIceServer(
 }
 
 let icePreparationPromise: Promise<IcePreparationResult> | null = null;
+let iceConnectionPreparationPromise: Promise<IceConnectionPreparationResult> | null = null;
+let resolveIceConnectionPreparation: ((result: IceConnectionPreparationResult) => void) | null = null;
 let icePreparationSnapshot: Pick<ConnectionProgress, IcePreparationStep> = {
   resource: pendingStep("Waiting to request Cloudflare resources"),
   stun: pendingStep("Checking STUN server"),
@@ -195,6 +260,9 @@ export function prepareIceServers(listener?: IcePreparationListener): Promise<Ic
   }
 
   if (!icePreparationPromise) {
+    iceConnectionPreparationPromise = new Promise<IceConnectionPreparationResult>((resolve) => {
+      resolveIceConnectionPreparation = resolve;
+    });
     icePreparationPromise = (async () => {
       const preparationStartedAt = performance.now();
       updateIcePreparation("resource", { state: "checking", detail: "Requesting Cloudflare ICE resources" });
@@ -233,8 +301,42 @@ export function prepareIceServers(listener?: IcePreparationListener): Promise<Ic
       updateIcePreparation("stun", { state: "checking", detail: "Testing STUN server" });
       updateIcePreparation("turn", { state: "checking", detail: "Testing TURN server" });
 
+      const readyStunServers: NonNullable<IceProbeResult>[] = [];
+      let completedStunProbes = 0;
+      let connectionPreparationResolved = false;
+      const resolveConnectionPreparation = () => {
+        if (connectionPreparationResolved) return;
+        connectionPreparationResolved = true;
+        const connectionStunServers = [...readyStunServers].sort((a, b) => a.latency - b.latency);
+        const primaryStunServer = connectionStunServers[0] ?? null;
+        updateIcePreparation(
+          "stun",
+          primaryStunServer
+            ? { state: "ready", detail: "Available STUN server detected", latency: primaryStunServer.latency }
+            : { state: "error", detail: "STUN server unavailable" },
+        );
+        resolveIceConnectionPreparation?.({
+          // TURN credentials are usable immediately; its diagnostic probe continues in the background.
+          servers: [...connectionStunServers.map(({ server }) => server), ...turnCandidates],
+        });
+        resolveIceConnectionPreparation = null;
+      };
+      const stunProbePromises = stunCandidates.map(({ provider, server }) => probeIceServer(server, "srflx", 4_500, provider));
+      const observedStunProbes = stunProbePromises.map((probe, index) => probe.then((result) => {
+        completedStunProbes += 1;
+        if (result && !readyStunServers.some((entry) => entry.provider === result.provider) && readyStunServers.length < 3) {
+          readyStunServers.push(result);
+        }
+        if (readyStunServers.length === 3 || completedStunProbes === stunCandidates.length) {
+          resolveConnectionPreparation();
+        }
+        return result;
+      }));
+
+      if (stunCandidates.length === 0) resolveConnectionPreparation();
+
       const [stunResults, turnResults] = await Promise.all([
-        Promise.all(stunCandidates.map(({ provider, server }) => probeIceServer(server, "srflx", 4_500, provider))),
+        Promise.all(observedStunProbes),
         Promise.all(turnCandidates.map((server) => probeIceServer(server, "relay"))),
       ]);
       const successfulByLatency = (results: IceProbeResult[]) =>
@@ -249,9 +351,10 @@ export function prepareIceServers(listener?: IcePreparationListener): Promise<Ic
         },
         [],
       );
-      const stun = fastestStunServers[0] ?? null;
+      const selectedStunServers = readyStunServers.sort((a, b) => a.latency - b.latency);
+      const stun = selectedStunServers[0] ?? fastestStunServers[0] ?? null;
       const turn = successfulByLatency(turnResults)[0] ?? null;
-      const selectedStunServers = new Set(fastestStunServers.map(({ server }) => server));
+      const selectedStunServerSet = new Set(selectedStunServers.map(({ server }) => server));
       const diagnostics: IceDiagnosticEntry[] = [
         ...stunResults.map((result, index) => {
           const candidate = stunCandidates[index];
@@ -260,7 +363,7 @@ export function prepareIceServers(listener?: IcePreparationListener): Promise<Ic
                 kind: "stun" as const,
                 latency: result.latency,
                 provider: candidate.provider,
-                selected: selectedStunServers.has(result.server),
+                selected: selectedStunServerSet.has(result.server),
                 state: "ready" as const,
                 url: iceServerUrl(result.server),
               }
@@ -326,9 +429,7 @@ export function prepareIceServers(listener?: IcePreparationListener): Promise<Ic
         diagnostics,
         duration: Math.round(performance.now() - preparationStartedAt),
         resource: icePreparationSnapshot.resource,
-        servers: [...fastestStunServers.map(({ server }) => server), turn?.server].filter(
-          (server): server is RTCIceServer => Boolean(server),
-        ),
+        servers: [...selectedStunServers.map(({ server }) => server), ...turnCandidates],
         stun,
         turn,
       };
@@ -336,6 +437,12 @@ export function prepareIceServers(listener?: IcePreparationListener): Promise<Ic
   }
 
   return icePreparationPromise;
+}
+
+/** Returns once three usable STUN providers have replied, while diagnostics keep measuring in the background. */
+export function prepareIceServersForConnection(listener?: IcePreparationListener): Promise<IceConnectionPreparationResult> {
+  void prepareIceServers(listener);
+  return iceConnectionPreparationPromise ?? Promise.resolve({ servers: [] });
 }
 
 export function preloadIceServers(): void {
@@ -348,12 +455,17 @@ export function stopObservingIceServers(listener: IcePreparationListener): void 
 
 /** Native WebRTC session using a Durable Object WebSocket only for SDP and ICE signaling. */
 export class NativeWebRTCSession {
-  private channel: RTCDataChannel | null = null;
+  private channels: Record<DataChannelName, RTCDataChannel | null> = {
+    bulk: null,
+    control: null,
+    interactive: null,
+  };
   private closed = false;
   private initiator = false;
   private peer: RTCPeerConnection | null = null;
   private pendingSignals: SignalMessage[] = [];
   private remoteParticipantJoined = false;
+  private icePreparationListener: IcePreparationListener | null = null;
   private progress = initialProgress();
   private readyForPeerConnection = false;
   private selectedServers: RTCIceServer[] = [];
@@ -361,6 +473,12 @@ export class NativeWebRTCSession {
   private socketPingStartedAt: number | null = null;
   private socketPingTimer: number | undefined;
   private socketPingTimeout: number | undefined;
+  private dataChannelPingStartedAt: number | null = null;
+  private dataChannelPingTimer: number | undefined;
+  private dataChannelPingTimeout: number | undefined;
+  private receivedBytes = 0;
+  private receivedChatIds = new Set<string>();
+  private sentBytes = 0;
 
   constructor(
     private readonly roomId: string,
@@ -370,6 +488,9 @@ export class NativeWebRTCSession {
     private readonly onRoomFull: () => void,
     private readonly onPeerLeft: () => void,
     private readonly onConnectionRoute: (route: ConnectionRoute) => void,
+    private readonly onInteractiveMessage: (message: InteractiveMessage) => void,
+    private readonly onChatReceipt: (id: string, status: ChatReceiptStatus) => void,
+    private readonly onChatTyping: () => void,
   ) {}
 
   connect(): void {
@@ -391,28 +512,50 @@ export class NativeWebRTCSession {
 
   close(): void {
     this.closed = true;
+    if (this.icePreparationListener) {
+      stopObservingIceServers(this.icePreparationListener);
+      this.icePreparationListener = null;
+    }
     this.stopSocketLatencyProbe();
-    this.channel?.close();
+    this.stopDataChannelLatencyProbe();
+    this.closeDataChannels();
     this.peer?.close();
     this.socket?.close();
   }
 
   send(data: string | ArrayBuffer | Blob): boolean {
-    if (this.channel?.readyState !== "open") return false;
-    if (typeof data === "string") this.channel.send(data);
-    else if (data instanceof Blob) this.channel.send(data);
-    else this.channel.send(data);
+    return this.sendOnChannel("interactive", data);
+  }
+
+  sendBulk(data: string | ArrayBuffer | Blob): boolean {
+    return this.sendOnChannel("bulk", data);
+  }
+
+  sendChatMessage(id: string, text: string): boolean {
+    const message = text.trim();
+    if (!id || id.length > 128 || !message || message.length > 4_000) return false;
+    return this.sendOnChannel("interactive", JSON.stringify({ id, text: message, type: "chat" satisfies InteractiveMessage["type"] }));
+  }
+
+  private sendOnChannel(channelName: DataChannelName, data: string | ArrayBuffer | Blob): boolean {
+    const channel = this.channels[channelName];
+    if (channel?.readyState !== "open") return false;
+    if (typeof data === "string") channel.send(data);
+    else if (data instanceof Blob) channel.send(data);
+    else channel.send(data);
+    this.sentBytes += dataSize(data);
+    this.updateDataTransferProgress();
     return true;
   }
 
   get dataChannel(): RTCDataChannel | null {
-    return this.channel;
+    return this.channels.interactive;
   }
 
   private async prepareIceServers(): Promise<void> {
     const listener: IcePreparationListener = (step, status) => this.setStep(step, status);
-    const preparation = await prepareIceServers(listener);
-    stopObservingIceServers(listener);
+    this.icePreparationListener = listener;
+    const preparation = await prepareIceServersForConnection(listener);
     this.selectedServers = preparation.servers;
 
     this.readyForPeerConnection = true;
@@ -454,6 +597,9 @@ export class NativeWebRTCSession {
 
     if (message.type === "peer-ready") {
       this.remoteParticipantJoined = true;
+      if (!this.readyForPeerConnection) {
+        this.setStep("p2p", { state: "checking", detail: "Peer joined, preparing P2P connection" });
+      }
       void this.createOffer();
       return;
     }
@@ -466,15 +612,13 @@ export class NativeWebRTCSession {
 
     if (message.type === "peer-left") {
       this.remoteParticipantJoined = false;
+      this.stopDataChannelLatencyProbe();
+      this.useConnectingSocketLatencyInterval();
       this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
-      this.setStep("dataChannel", { state: "pending", detail: "Waiting for data channel" });
-      if (this.channel) {
-        this.channel.onclose = null;
-        this.channel.onerror = null;
-      }
+      this.setStep("dataChannel", { channels: 0, state: "pending", detail: "Waiting for data channel", transferred: this.dataTransfer() });
+      this.closeDataChannels();
       this.peer?.close();
       this.peer = null;
-      this.channel = null;
       this.onPeerLeft();
       return;
     }
@@ -491,8 +635,9 @@ export class NativeWebRTCSession {
   private async createOffer(): Promise<void> {
     if (!this.readyForPeerConnection || this.peer || this.closed) return;
     const peer = this.createPeerConnection();
-    const channel = peer.createDataChannel("zestsend", { ordered: true });
-    this.attachDataChannel(channel);
+    for (const channelName of DATA_CHANNEL_NAMES) {
+      this.attachDataChannel(peer.createDataChannel(channelName, { ordered: true }));
+    }
     this.setStep("p2p", { state: "checking", detail: "Creating P2P offer" });
     const offer = await peer.createOffer();
     await peer.setLocalDescription(offer);
@@ -546,13 +691,29 @@ export class NativeWebRTCSession {
   }
 
   private attachDataChannel(channel: RTCDataChannel): void {
-    this.channel = channel;
-    this.setStep("dataChannel", { state: "checking", detail: "Opening data channel" });
+    if (!isDataChannelName(channel.label)) {
+      channel.close();
+      return;
+    }
+
+    const channelName = channel.label;
+    this.channels[channelName] = channel;
+    this.updateDataChannelProgress();
     channel.binaryType = "arraybuffer";
     channel.onopen = () => {
-      this.setStep("dataChannel", { state: "active", detail: "Data channel ready" });
+      this.updateDataChannelProgress();
+      if (channelName === "control") this.startDataChannelLatencyProbe();
+      if (this.openDataChannelCount() === DATA_CHANNEL_COUNT) {
+        this.useConnectedSocketLatencyInterval();
+        this.onConnected(this);
+      }
       if (this.peer) void this.detectConnectionRoute(this.peer);
-      this.onConnected(this);
+    };
+    channel.onmessage = (event) => {
+      this.receivedBytes += dataSize(event.data);
+      this.updateDataTransferProgress();
+      if (channelName === "control") this.handleDataChannelMessage(event.data);
+      if (channelName === "interactive") this.handleInteractiveMessage(event.data);
     };
     channel.onclose = () => this.handlePeerDisconnect();
     channel.onerror = () => this.handlePeerDisconnect();
@@ -560,14 +721,12 @@ export class NativeWebRTCSession {
 
   private handlePeerDisconnect(): void {
     if (this.closed) return;
+    this.stopDataChannelLatencyProbe();
+    this.useConnectingSocketLatencyInterval();
     this.remoteParticipantJoined = false;
     this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
-    this.setStep("dataChannel", { state: "pending", detail: "Waiting for data channel" });
-    const channel = this.channel;
-    this.channel = null;
-    channel?.close();
-    channel && (channel.onclose = null);
-    channel && (channel.onerror = null);
+    this.setStep("dataChannel", { channels: 0, state: "pending", detail: "Waiting for data channel", transferred: this.dataTransfer() });
+    this.closeDataChannels();
     const peer = this.peer;
     this.peer = null;
     peer?.close();
@@ -598,7 +757,22 @@ export class NativeWebRTCSession {
 
   private startSocketLatencyProbe(): void {
     this.measureSocketLatency();
-    this.socketPingTimer = window.setInterval(() => this.measureSocketLatency(), 5_000);
+    this.setSocketLatencyInterval(5_000);
+  }
+
+  private useConnectingSocketLatencyInterval(): void {
+    this.setSocketLatencyInterval(5_000);
+  }
+
+  private useConnectedSocketLatencyInterval(): void {
+    this.setSocketLatencyInterval(30_000);
+  }
+
+  private setSocketLatencyInterval(interval: number): void {
+    if (this.socketPingTimer !== undefined) {
+      window.clearInterval(this.socketPingTimer);
+    }
+    this.socketPingTimer = window.setInterval(() => this.measureSocketLatency(), interval);
   }
 
   private stopSocketLatencyProbe(): void {
@@ -632,6 +806,136 @@ export class NativeWebRTCSession {
 
   private sendSocket(message: object): void {
     if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
+  }
+
+  private handleDataChannelMessage(data: unknown): void {
+    if (typeof data !== "string") return;
+
+    let message: DataChannelControlMessage;
+    try {
+      message = JSON.parse(data) as DataChannelControlMessage;
+    } catch {
+      return;
+    }
+
+    if (message.type === "chat-received" || message.type === "chat-read") {
+      if (typeof message.id === "string" && message.id.length > 0 && message.id.length <= 128) {
+        this.onChatReceipt(message.id, message.type === "chat-read" ? "read" : "received");
+      }
+      return;
+    }
+
+    if (message.type === "chat-typing") {
+      this.onChatTyping();
+      return;
+    }
+
+    if (message.type === "zestsend-ping") {
+      this.sendDataChannelControl({ id: message.id, type: "zestsend-pong" });
+      return;
+    }
+
+    const startedAt = this.dataChannelPingStartedAt;
+    if (message.type !== "zestsend-pong" || startedAt === null || message.id !== String(startedAt)) return;
+
+    const latency = Math.round(performance.now() - startedAt);
+    this.dataChannelPingStartedAt = null;
+    if (this.dataChannelPingTimeout !== undefined) {
+      window.clearTimeout(this.dataChannelPingTimeout);
+      this.dataChannelPingTimeout = undefined;
+    }
+    this.setStep("p2p", { state: "active", detail: "P2P connection established", latency });
+  }
+
+  private handleInteractiveMessage(data: unknown): void {
+    if (typeof data !== "string") return;
+
+    try {
+      const message = JSON.parse(data) as unknown;
+      if (isInteractiveMessage(message)) {
+        this.sendDataChannelControl({ id: message.id, type: "chat-received" });
+        if (this.receivedChatIds.has(message.id)) return;
+        this.receivedChatIds.add(message.id);
+        this.onInteractiveMessage(message);
+      }
+    } catch {
+      // Ignore malformed application messages without affecting the data channel.
+    }
+  }
+
+  private startDataChannelLatencyProbe(): void {
+    this.measureDataChannelLatency();
+    this.dataChannelPingTimer = window.setInterval(() => this.measureDataChannelLatency(), 5_000);
+  }
+
+  private stopDataChannelLatencyProbe(): void {
+    if (this.dataChannelPingTimer !== undefined) {
+      window.clearInterval(this.dataChannelPingTimer);
+      this.dataChannelPingTimer = undefined;
+    }
+    if (this.dataChannelPingTimeout !== undefined) {
+      window.clearTimeout(this.dataChannelPingTimeout);
+      this.dataChannelPingTimeout = undefined;
+    }
+    this.dataChannelPingStartedAt = null;
+  }
+
+  private measureDataChannelLatency(): void {
+    if (this.closed || this.dataChannelPingStartedAt !== null || this.channels.control?.readyState !== "open") return;
+
+    const startedAt = performance.now();
+    this.dataChannelPingStartedAt = startedAt;
+    this.sendDataChannelControl({ id: String(startedAt), type: "zestsend-ping" });
+    this.dataChannelPingTimeout = window.setTimeout(() => {
+      this.dataChannelPingStartedAt = null;
+      this.dataChannelPingTimeout = undefined;
+    }, 5_000);
+  }
+
+  private sendDataChannelControl(message: DataChannelControlMessage): void {
+    this.sendOnChannel("control", JSON.stringify(message));
+  }
+
+  markChatMessageRead(id: string): boolean {
+    if (!id || id.length > 128) return false;
+    return this.sendOnChannel("control", JSON.stringify({ id, type: "chat-read" satisfies ChatReceiptMessage["type"] }));
+  }
+
+  sendChatTyping(): boolean {
+    return this.sendOnChannel("control", JSON.stringify({ type: "chat-typing" satisfies ChatTypingMessage["type"] }));
+  }
+
+  private openDataChannelCount(): number {
+    return DATA_CHANNEL_NAMES.filter((channelName) => this.channels[channelName]?.readyState === "open").length;
+  }
+
+  private updateDataChannelProgress(): void {
+    const channels = this.openDataChannelCount();
+    this.setStep("dataChannel", {
+      channels,
+      detail: channels === DATA_CHANNEL_COUNT ? "Data channels ready" : "Opening data channels",
+      state: channels === DATA_CHANNEL_COUNT ? "active" : "checking",
+      transferred: this.dataTransfer(),
+    });
+  }
+
+  private updateDataTransferProgress(): void {
+    this.setStep("dataChannel", { ...this.progress.dataChannel, transferred: this.dataTransfer() });
+  }
+
+  private dataTransfer(): { received: number; sent: number } {
+    return { received: this.receivedBytes, sent: this.sentBytes };
+  }
+
+  private closeDataChannels(): void {
+    for (const channelName of DATA_CHANNEL_NAMES) {
+      const channel = this.channels[channelName];
+      if (!channel) continue;
+      channel.onclose = null;
+      channel.onerror = null;
+      channel.close();
+      this.channels[channelName] = null;
+    }
   }
 
   private setStep(step: keyof ConnectionProgress, value: ConnectionStep): void {
