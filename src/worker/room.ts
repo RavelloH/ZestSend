@@ -28,7 +28,13 @@ export class Room extends DurableObject<Env> {
 
     const peers = this.ctx.getWebSockets();
     if (peers.length >= MAX_PEERS) {
-      return Response.json({ message: "Room is full." }, { status: 403 });
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      server.accept();
+      server.send(JSON.stringify({ type: "error", code: "room-full", message: "Room is full." }));
+      server.close(4_003, "Room is full");
+      return new Response(null, { status: 101, webSocket: client });
     }
 
     const pair = new WebSocketPair();

@@ -22,14 +22,33 @@ const chineseHomeRoute = createRoute({
   component: () => <Home locale="zh" />,
 });
 
-const roomRoute = createRoute({
+const englishRoomRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/room/$roomId",
-  component: Room,
+  path: "/en/room/$roomId",
+  component: () => {
+    const { roomId } = englishRoomRoute.useParams();
+    return <Room locale="en" roomId={roomId} />;
+  },
   validateSearch: (search: Record<string, unknown>) => search,
 });
 
-const routeTree = rootRoute.addChildren([homeRoute, englishHomeRoute, chineseHomeRoute, roomRoute]);
+const chineseRoomRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/zh/room/$roomId",
+  component: () => {
+    const { roomId } = chineseRoomRoute.useParams();
+    return <Room locale="zh" roomId={roomId} />;
+  },
+  validateSearch: (search: Record<string, unknown>) => search,
+});
+
+const routeTree = rootRoute.addChildren([
+  homeRoute,
+  englishHomeRoute,
+  chineseHomeRoute,
+  englishRoomRoute,
+  chineseRoomRoute,
+]);
 
 export const router = createRouter({ routeTree });
 

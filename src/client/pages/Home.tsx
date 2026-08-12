@@ -146,7 +146,7 @@ const homeCopy: Record<
     language: "zh-CN",
     prefix: "匿名",
     codeInputLabel: "连接数字第",
-    codeHint: "与其他人输入任意四位相同数字来连接。",
+    codeHint: "与其他人输入任意四位相同数字来连接",
     footerLinks: ["语言", "设置", "关于"],
     languageDialog: {
       close: "关闭语言选择",
@@ -738,9 +738,12 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
 
   const handleRoomCodeComplete = useCallback(
     (roomId: string) => {
-      void navigate({ to: "/room/$roomId", params: { roomId } });
+      void navigate({
+        to: locale === "zh" ? "/zh/room/$roomId" : "/en/room/$roomId",
+        params: { roomId },
+      });
     },
-    [navigate],
+    [locale, navigate],
   );
 
   return (

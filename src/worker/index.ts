@@ -53,7 +53,7 @@ function localeCookie(locale: Locale): string {
   return `${LOCALE_COOKIE}=${locale}; Path=/; Max-Age=${LOCALE_COOKIE_MAX_AGE}; SameSite=Lax`;
 }
 
-function localizedHomeResponse(request: Request, locale: Locale, assets: Fetcher): Promise<Response> {
+function localizedResponse(request: Request, locale: Locale, assets: Fetcher): Promise<Response> {
   return assets.fetch(request).then((response) => {
     const headers = new Headers(response.headers);
     headers.append("Set-Cookie", localeCookie(locale));
@@ -74,8 +74,8 @@ app.get("/", (context) => {
   return new Response(null, { status: 307, headers });
 });
 
-app.get("/en", (context) => localizedHomeResponse(context.req.raw, "en", context.env.ASSETS));
-app.get("/zh", (context) => localizedHomeResponse(context.req.raw, "zh", context.env.ASSETS));
+app.get("/en", (context) => localizedResponse(context.req.raw, "en", context.env.ASSETS));
+app.get("/zh", (context) => localizedResponse(context.req.raw, "zh", context.env.ASSETS));
 
 function roomIsValid(roomId: string | undefined): roomId is string {
   return /^\d{4}$/.test(roomId ?? "");
@@ -84,6 +84,27 @@ function roomIsValid(roomId: string | undefined): roomId is string {
 function roomFor(env: ApiBindings, roomId: string) {
   return env.ROOMS.getByName(roomId);
 }
+
+function localizedRoomResponse(context: { env: ApiBindings; req: { raw: Request; param: (name: string) => string } }, locale: Locale): Promise<Response> | Response {
+  const roomId = context.req.param("roomId");
+  if (!roomIsValid(roomId)) return Response.json({ message: "Invalid room ID." }, { status: 400 });
+  return localizedResponse(context.req.raw, locale, context.env.ASSETS);
+}
+
+app.get("/room/:roomId", (context) => {
+  const roomId = context.req.param("roomId");
+  if (!roomIsValid(roomId)) return context.json({ message: "Invalid room ID." }, 400);
+
+  const url = new URL(context.req.raw.url);
+  const locale = requestLocale(context.req.raw);
+  url.pathname = `/${locale}/room/${roomId}`;
+  const headers = new Headers({ Location: url.toString(), Vary: "Cookie, Accept-Language" });
+  headers.append("Set-Cookie", localeCookie(locale));
+  return new Response(null, { status: 307, headers });
+});
+
+app.get("/en/room/:roomId", (context) => localizedRoomResponse(context, "en"));
+app.get("/zh/room/:roomId", (context) => localizedRoomResponse(context, "zh"));
 
 function methodNotAllowed(message: string): Response {
   return Response.json({ message }, { status: 405 });

@@ -8,7 +8,7 @@
     "directory": "./dist/client",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/", "/en", "/zh"]
+    "run_worker_first": ["/api/*", "/", "/en", "/zh", "/room/*", "/en/room/*", "/zh/room/*"]
   },
   "durable_objects": {
     "bindings": [

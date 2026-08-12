@@ -1,6 +1,7 @@
 import {
   RiArrowLeftLine,
   RiCheckboxCircleFill,
+  RiCloseCircleFill,
   RiExchange2Line,
   RiGlobalLine,
   RiRadioButtonLine,
@@ -10,7 +11,7 @@ import {
   RiWifiLine,
 } from "@remixicon/react";
 import NumberFlow, { continuous } from "@number-flow/react";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 
@@ -36,7 +37,7 @@ type RoomLocale = "en" | "zh";
 const roomCopy = {
   en: {
     connectingTitle: "Establishing an end-to-end connection",
-    connectionErrorTitle: "Connection needs attention",
+    connectionErrorTitle: "Reconnecting",
     preparing: (roomId: string) => `Ask the other person to enter room number ${roomId}, or share the room link.`,
     room: "ROOM",
     resource: "Request connection servers",
@@ -50,12 +51,15 @@ const roomCopy = {
     leave: "Exit",
     share: "Share",
     copied: "Room link copied",
+    roomFullDescription: "This room already has two participants. Try a different four-digit room number.",
+    roomFullTitle: "Room is full",
+    returnHome: "Return home",
     pageTitle: (roomId: string) => `Connecting to room ${roomId}`,
     roomTitle: (roomId: string) => `ZestSend room ${roomId}`,
   },
   zh: {
     connectingTitle: "正在建立端对端连接",
-    connectionErrorTitle: "连接需要处理",
+    connectionErrorTitle: "断线重连中",
     preparing: (roomId: string) => `请让对方输入房间号：${roomId}，或者点击分享链接。`,
     room: "房间",
     resource: "请求连接服务器",
@@ -69,6 +73,9 @@ const roomCopy = {
     leave: "退出",
     share: "分享",
     copied: "房间链接已复制",
+    roomFullDescription: "这个房间已有两位参与者，请换一个四位房间号后重试。",
+    roomFullTitle: "房间已满",
+    returnHome: "返回首页",
     pageTitle: (roomId: string) => `正在连接房间 ${roomId}`,
     roomTitle: (roomId: string) => `ZestSend 房间 ${roomId}`,
   },
@@ -103,17 +110,9 @@ const detailTranslation: Record<string, string> = {
   "Opening data channel": "正在打开数据通道",
   "Data channel ready": "数据通道已就绪",
   "Data channel closed": "数据通道已关闭",
-  "Data channel failed.": "数据通道失败",
+  "Data channel failed.": "与对方断开连接，正在重新连接。",
   "The signaling WebSocket could not be opened.": "无法打开信令 WebSocket",
 };
-
-function activeLocale(): RoomLocale {
-  try {
-    return window.localStorage.getItem("zestsend_locale") === "en" ? "en" : "zh";
-  } catch {
-    return document.documentElement.lang.startsWith("en") ? "en" : "zh";
-  }
-}
 
 function localizedDetail(locale: RoomLocale, detail: string): string {
   return locale === "zh" ? (detailTranslation[detail] ?? detail) : detail;
@@ -230,12 +229,16 @@ function ConnectionDialog({
   error,
   locale,
   onLeave,
+  onExitComplete,
+  open,
   progress,
   roomId,
 }: {
   error: string | null;
   locale: RoomLocale;
   onLeave: () => void;
+  onExitComplete?: () => void;
+  open: boolean;
   progress: ConnectionProgress;
   roomId: string;
 }) {
@@ -265,7 +268,7 @@ function ConnectionDialog({
   };
 
   return (
-    <Dialog open onOpenChange={() => undefined}>
+    <Dialog open={open} onExitComplete={onExitComplete} onOpenChange={() => undefined}>
       <DialogContent aria-labelledby="connection-title" className="!max-w-2xl">
         <div className="flex items-center justify-between gap-5 border-b border-white/10 p-6 sm:p-8">
           <div className="min-w-0">
@@ -324,19 +327,33 @@ function ConnectionDialog({
   );
 }
 
-function ConnectedRoom({ locale, roomId, onLeave }: { locale: RoomLocale; roomId: string; onLeave: () => void }) {
+function ReadyDialog({
+  locale,
+  onExitComplete,
+  onLeave,
+  open,
+  roomId,
+}: {
+  locale: RoomLocale;
+  onExitComplete?: () => void;
+  onLeave: () => void;
+  open: boolean;
+  roomId: string;
+}) {
   const copy = roomCopy[locale];
   return (
-    <Layout title={copy.roomTitle(roomId)}>
-      <main className="flex min-h-screen items-center justify-center p-5 sm:p-8">
-        <motion.section
-          animate={{ opacity: 1, y: 0 }}
-          className="glass w-full max-w-2xl rounded-lg p-7 text-center sm:p-10"
-          initial={{ opacity: 0, y: 16 }}
-        >
+    <Dialog fullScreen open={open} overlay={false} onExitComplete={onExitComplete} onOpenChange={() => undefined}>
+      <DialogContent
+        fadeOnly
+        fullScreen
+        aria-labelledby="connection-ready-title"
+        style={{ height: "100dvh", maxHeight: "none", width: "100dvw" }}
+      >
+        <div className="flex min-h-full flex-1 items-center justify-center p-7 text-center sm:p-10">
+          <div>
           <RiCheckboxCircleFill aria-hidden="true" className="mx-auto size-12 text-emerald-300" />
           <p className="mt-5 text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.room} {roomId}</p>
-          <h1 className="mt-2 text-3xl font-bold tracking-[0.04em] text-sky-50">{copy.ready}</h1>
+          <h1 id="connection-ready-title" className="mt-2 text-3xl font-bold tracking-[0.04em] text-sky-50">{copy.ready}</h1>
           <p className="mx-auto mt-4 max-w-lg text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/65">
             {copy.readyDescription}
           </p>
@@ -348,17 +365,44 @@ function ConnectedRoom({ locale, roomId, onLeave }: { locale: RoomLocale; roomId
           >
             <RiArrowLeftLine aria-hidden="true" className="size-5" />
           </button>
-        </motion.section>
-      </main>
-    </Layout>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
-export default function Room() {
-  const locale = activeLocale();
+function RoomFullContent({ locale, onLeave, roomId }: { locale: RoomLocale; onLeave: () => void; roomId: string }) {
+  const copy = roomCopy[locale];
+
+  return (
+    <Dialog open onOpenChange={() => undefined}>
+      <DialogContent aria-labelledby="room-full-title" className="!max-w-md">
+        <div className="p-7 text-center sm:p-9">
+          <RiCloseCircleFill aria-hidden="true" className="mx-auto size-12 text-rose-300" />
+          <p className="mt-5 text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.room} {roomId}</p>
+          <h1 id="room-full-title" className="mt-2 text-2xl font-bold tracking-[0.04em] text-sky-50 sm:text-3xl">
+            {copy.roomFullTitle}
+          </h1>
+          <p className="mx-auto mt-3 max-w-sm text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/65">
+            {copy.roomFullDescription}
+          </p>
+          <button
+            className="mt-8 inline-flex h-10 items-center justify-center rounded-md border border-white/10 px-4 text-sm font-semibold tracking-[0.04em] text-sky-100/80 transition-colors hover:bg-white/[0.05] hover:text-sky-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60"
+            onClick={onLeave}
+            type="button"
+          >
+            {copy.returnHome}
+          </button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: string }) {
   const navigate = useNavigate();
-  const { roomId } = useParams({ from: "/room/$roomId" });
-  const [connected, setConnected] = useState(false);
+  const [dialogPhase, setDialogPhase] = useState<"connecting" | "closing-for-full" | "closing-for-ready" | "closing-for-reconnect" | "full" | "ready">("connecting");
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ConnectionProgress>({
     websocket: { state: "pending", detail: "Waiting for signaling socket" },
@@ -371,7 +415,20 @@ export default function Room() {
   const sessionRef = useRef<NativeWebRTCSession | null>(null);
 
   useEffect(() => {
-    const session = new NativeWebRTCSession(roomId, setProgress, () => setConnected(true), setError);
+    const session = new NativeWebRTCSession(
+      roomId,
+      setProgress,
+      () => setDialogPhase("closing-for-ready"),
+      setError,
+      () => {
+        session.close();
+        setDialogPhase("closing-for-full");
+      },
+      () => {
+        setError("Data channel failed.");
+        setDialogPhase("closing-for-reconnect");
+      },
+    );
     sessionRef.current = session;
     session.connect();
 
@@ -386,11 +443,34 @@ export default function Room() {
     void navigate({ to: locale === "zh" ? "/zh" : "/en" });
   };
 
-  if (connected) return <ConnectedRoom locale={locale} roomId={roomId} onLeave={leave} />;
-
   return (
-    <Layout title={roomCopy[locale].pageTitle(roomId)}>
-      <ConnectionDialog error={error} locale={locale} onLeave={leave} progress={progress} roomId={roomId} />
+    <Layout title={dialogPhase === "ready" ? roomCopy[locale].roomTitle(roomId) : roomCopy[locale].pageTitle(roomId)}>
+      {dialogPhase === "full" ? (
+        <RoomFullContent locale={locale} onLeave={leave} roomId={roomId} />
+      ) : dialogPhase === "ready" || dialogPhase === "closing-for-reconnect" ? (
+        <ReadyDialog
+          locale={locale}
+          onExitComplete={() => {
+            if (dialogPhase === "closing-for-reconnect") setDialogPhase("connecting");
+          }}
+          onLeave={leave}
+          open={dialogPhase === "ready"}
+          roomId={roomId}
+        />
+      ) : (
+        <ConnectionDialog
+          error={error}
+          locale={locale}
+          onExitComplete={() => {
+            if (dialogPhase === "closing-for-full") setDialogPhase("full");
+            if (dialogPhase === "closing-for-ready") setDialogPhase("ready");
+          }}
+          onLeave={leave}
+          open={dialogPhase === "connecting"}
+          progress={progress}
+          roomId={roomId}
+        />
+      )}
     </Layout>
   );
 }

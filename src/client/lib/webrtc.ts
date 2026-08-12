@@ -28,7 +28,7 @@ type ServerMessage =
   | { peerId: string; type: "peer-ready" }
   | { peerId?: string; type: "peer-left" }
   | SignalMessage
-  | { message: string; type: "error" }
+  | { code?: "room-full"; message: string; type: "error" }
   | { type: "pong" };
 
 type TurnResponse = { error?: string; iceServers?: RTCIceServer[] };
@@ -261,6 +261,8 @@ export class NativeWebRTCSession {
     private readonly onProgress: (progress: ConnectionProgress) => void,
     private readonly onConnected: (session: NativeWebRTCSession) => void,
     private readonly onError: (message: string) => void,
+    private readonly onRoomFull: () => void,
+    private readonly onPeerLeft: () => void,
   ) {}
 
   connect(): void {
@@ -309,7 +311,7 @@ export class NativeWebRTCSession {
     this.readyForPeerConnection = true;
     this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
     await this.flushSignals();
-    if (this.initiator && this.remoteParticipantJoined) await this.createOffer();
+    if (this.remoteParticipantJoined) await this.createOffer();
   }
 
   private handleSocketMessage(rawMessage: string): void {
@@ -343,7 +345,7 @@ export class NativeWebRTCSession {
       return;
     }
 
-    if (message.type === "peer-ready" && this.initiator) {
+    if (message.type === "peer-ready") {
       this.remoteParticipantJoined = true;
       void this.createOffer();
       return;
@@ -357,15 +359,26 @@ export class NativeWebRTCSession {
 
     if (message.type === "peer-left") {
       this.remoteParticipantJoined = false;
-      this.setStep("p2p", { state: "pending", detail: "The other participant left" });
+      this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
       this.setStep("dataChannel", { state: "pending", detail: "Waiting for data channel" });
+      if (this.channel) {
+        this.channel.onclose = null;
+        this.channel.onerror = null;
+      }
       this.peer?.close();
       this.peer = null;
       this.channel = null;
+      this.onPeerLeft();
       return;
     }
 
-    if (message.type === "error") this.fail(message.message);
+    if (message.type === "error") {
+      if (message.code === "room-full") {
+        this.onRoomFull();
+        return;
+      }
+      this.fail(message.message);
+    }
   }
 
   private async createOffer(): Promise<void> {
@@ -430,8 +443,25 @@ export class NativeWebRTCSession {
       this.setStep("dataChannel", { state: "active", detail: "Data channel ready" });
       this.onConnected(this);
     };
-    channel.onclose = () => this.setStep("dataChannel", { state: "error", detail: "Data channel closed" });
-    channel.onerror = () => this.fail("Data channel failed.");
+    channel.onclose = () => this.handlePeerDisconnect();
+    channel.onerror = () => this.handlePeerDisconnect();
+  }
+
+  private handlePeerDisconnect(): void {
+    if (this.closed) return;
+    this.remoteParticipantJoined = false;
+    this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
+    this.setStep("dataChannel", { state: "pending", detail: "Waiting for data channel" });
+    const channel = this.channel;
+    this.channel = null;
+    channel?.close();
+    channel && (channel.onclose = null);
+    channel && (channel.onerror = null);
+    const peer = this.peer;
+    this.peer = null;
+    peer?.close();
+    this.onError("Data channel failed.");
+    this.onPeerLeft();
   }
 
   private sendSignal(payload: SignalMessage["payload"]): void {

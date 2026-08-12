@@ -30,11 +30,17 @@ function useDialog() {
 
 export function Dialog({
   children,
+  fullScreen = false,
+  overlay = true,
   onOpenChange,
+  onExitComplete,
   open,
 }: {
   children: ReactNode;
+  fullScreen?: boolean;
+  overlay?: boolean;
   onOpenChange: (open: boolean) => void;
+  onExitComplete?: () => void;
   open: boolean;
 }) {
   const layerRef = useRef<HTMLDivElement>(null);
@@ -89,18 +95,23 @@ export function Dialog({
 
   return createPortal(
     <DialogContext.Provider value={{ onOpenChange }}>
-      <AnimatePresence>
+      <AnimatePresence onExitComplete={onExitComplete}>
         {open ? (
           <motion.div
             ref={layerRef}
             animate={{ opacity: 1 }}
             aria-label="Dialog overlay"
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm sm:p-8"
+            className={cn(
+              "fixed inset-0 z-[100] flex items-center justify-center",
+              !fullScreen && "p-4 sm:p-8",
+              overlay && "bg-black/65 backdrop-blur-sm",
+            )}
             exit={{ opacity: 0 }}
-            initial={{ opacity: 0 }}
+            initial={false}
             onMouseDown={(event) => {
               if (event.target === event.currentTarget) close();
             }}
+            transition={{ duration: 0.26, ease: "easeOut" }}
           >
             {children}
           </motion.div>
@@ -111,19 +122,22 @@ export function Dialog({
   );
 }
 
-export const DialogContent = forwardRef<HTMLDivElement, HTMLMotionProps<"div">>(
-  ({ className, children, ...props }, ref) => (
+type DialogContentProps = HTMLMotionProps<"div"> & { fadeOnly?: boolean; fullScreen?: boolean };
+
+export const DialogContent = forwardRef<HTMLDivElement, DialogContentProps>(
+  ({ className, children, fadeOnly = false, fullScreen = false, ...props }, ref) => (
     <motion.div
       ref={ref}
-      animate={{ opacity: 1, scale: 1, y: 0 }}
+      animate={fadeOnly ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
       className={cn(
         "glass zest-dialog-content flex w-full max-w-3xl flex-col overflow-hidden rounded-lg text-gray-100",
+        fullScreen && "fixed inset-0 h-dvh max-h-none w-screen max-w-none rounded-none",
         className,
       )}
-      exit={{ opacity: 0, scale: 0.98, y: 18 }}
-      initial={{ opacity: 0, scale: 0.98, y: 18 }}
+      exit={fadeOnly ? { opacity: 0 } : { opacity: 0, scale: 0.98, y: 18 }}
+      initial={fadeOnly ? { opacity: 0 } : { opacity: 0, scale: 0.98, y: 18 }}
       role="dialog"
-      transition={{ type: "spring", stiffness: 380, damping: 32, mass: 0.8 }}
+      transition={fadeOnly ? { duration: 0.24, ease: "easeOut" } : { type: "spring", stiffness: 380, damping: 32, mass: 0.8 }}
       {...props}
     >
       <OverlayScrollbar className="min-h-0 flex-1 overscroll-contain">{children as ReactNode}</OverlayScrollbar>
