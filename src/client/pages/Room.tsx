@@ -33,6 +33,9 @@ import {
   RiRefreshLine,
   RiShareForwardLine,
   RiRouterLine,
+  RiSignalCellular1Fill,
+  RiSignalCellular2Fill,
+  RiSignalCellular3Fill,
   RiSendPlane2Fill,
   RiStopLine,
   RiLogoutBoxRLine,
@@ -307,6 +310,31 @@ function latencyColor(latency: number, realtimeConnection = false): string {
   return "text-rose-300";
 }
 
+function signalLevel(latency: number | undefined): 1 | 2 | 3 {
+  if (latency === undefined) return 1;
+  if (latency <= 50) return 3;
+  if (latency <= 499) return 2;
+  return 1;
+}
+
+function SignalIcon({ level, className }: { level: 1 | 2 | 3; className?: string }) {
+  const Icon = level === 3 ? RiSignalCellular3Fill : level === 2 ? RiSignalCellular2Fill : RiSignalCellular1Fill;
+  return (
+    <AnimatePresence initial={false} mode="wait">
+      <motion.span
+        animate={{ opacity: 1 }}
+        className="inline-flex"
+        exit={{ opacity: 0 }}
+        initial={{ opacity: 0 }}
+        key={level}
+        transition={{ duration: 0.18, ease: "easeOut" }}
+      >
+        <Icon aria-hidden="true" className={className} />
+      </motion.span>
+    </AnimatePresence>
+  );
+}
+
 function LatencyValue({ latency, realtimeConnection = false }: { latency: number; realtimeConnection?: boolean }) {
   const value = Math.round(latency);
   return (
@@ -535,23 +563,57 @@ function transferredValue(bytes: number): { precision: number; unit: "B" | "KB" 
   return { precision: bytes < 10 * 1_024 * 1_024 ? 2 : 1, unit: "MB", value: bytes / (1_024 * 1_024) };
 }
 
-function TransferAmount({ bytes }: { bytes: number }) {
-  const { precision, unit, value } = transferredValue(bytes);
-  const displayedValue = displayedNumber(value, precision);
-  return (
-    <motion.span
-      layout="position"
-      className="ml-1 inline-flex items-center"
-      transition={{ layout: { duration: 0.42, ease: "easeOut" } }}
-    >
-      <NumberFlow
-        className="inline-flex leading-none"
-        format={{ maximumFractionDigits: precision, minimumFractionDigits: precision }}
-        value={displayedValue}
-        willChange
-      />
-      <motion.span layout="position" className="ml-1" transition={{ layout: { duration: 0.42, ease: "easeOut" } }}>{unit}</motion.span>
+function useTransferRates(transferred?: { received: number; sent: number }) {
+  const latestRef = useRef(transferred);
+  const previousRef = useRef<{ received: number; sent: number } | null>(null);
+  const [rates, setRates] = useState({ received: 0, sent: 0 });
+  latestRef.current = transferred;
+
+  useEffect(() => {
+    previousRef.current = {
+      received: transferred?.received ?? 0,
+      sent: transferred?.sent ?? 0,
+    };
+    const timer = window.setInterval(() => {
+      const current = {
+        received: latestRef.current?.received ?? 0,
+        sent: latestRef.current?.sent ?? 0,
+      };
+      const previous = previousRef.current ?? current;
+      setRates({
+        received: Math.max(0, current.received - previous.received),
+        sent: Math.max(0, current.sent - previous.sent),
+      });
+      previousRef.current = current;
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return rates;
+}
+
+function DataTransferStats({ transferred, mode = "totals" }: { transferred?: { received: number; sent: number }; mode?: "rates" | "totals" }) {
+  const rates = useTransferRates(transferred);
+  const sent = transferred?.sent ?? 0;
+  const received = transferred?.received ?? 0;
+  const separator = <motion.span layout="position" className="mx-2 font-mono text-sky-100/35">·</motion.span>;
+  const metric = (direction: "down" | "up", bytes: number, suffix = "") => (
+    <motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>
+      <motion.span layout="position" className="mr-1 text-sky-200/70">{direction === "up" ? "↑" : "↓"}</motion.span>
+      <FileSizeValue bytes={bytes} suffix={suffix} />
     </motion.span>
+  );
+
+  return (
+    <NumberFlowGroup>
+      <motion.div
+        layout="position"
+        className="flex shrink-0 flex-wrap items-baseline gap-y-1 text-xs font-medium text-sky-100/55 sm:text-sm"
+        transition={{ layout: { duration: 0.42, ease: "easeOut" } }}
+      >
+        {mode === "totals" ? <>{metric("up", sent)}{separator}{metric("down", received)}{separator}<motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><FileSizeValue bytes={rates.sent + rates.received} suffix="/s" /></motion.span></> : <>{metric("up", rates.sent, "/s")}{separator}{metric("down", rates.received, "/s")}</>}
+      </motion.div>
+    </NumberFlowGroup>
   );
 }
 
@@ -588,17 +650,7 @@ function StatusMetric({ icon: Icon, label, locale, realtimeConnection = false, s
         </AutoTransition>
       </div>
       {status.transferred !== undefined ? (
-        <NumberFlowGroup>
-          <motion.span
-            layout
-            className="inline-flex shrink-0 items-center font-mono text-xs font-semibold leading-none tabular-nums text-sky-100/55 sm:text-sm"
-            transition={{ layout: { duration: 0.42, ease: "easeOut" } }}
-          >
-            <motion.span layout="position" className="text-sky-200/70" transition={{ layout: { duration: 0.42, ease: "easeOut" } }}>↑</motion.span><TransferAmount bytes={status.transferred.sent} />
-            <motion.span layout="position" className="mx-2 text-sky-100/35" transition={{ layout: { duration: 0.42, ease: "easeOut" } }}>·</motion.span>
-            <motion.span layout="position" className="text-sky-200/70" transition={{ layout: { duration: 0.42, ease: "easeOut" } }}>↓</motion.span><TransferAmount bytes={status.transferred.received} />
-          </motion.span>
-        </NumberFlowGroup>
+        <DataTransferStats transferred={status.transferred} />
       ) : (
         <AutoTransition
           as="span"
@@ -1011,6 +1063,7 @@ function RoomWorkspace({
   const [unreadChatCount, setUnreadChatCount] = useState(0);
   const [isExitDialogOpen, setExitDialogOpen] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
+  const [showConnectionRates, setShowConnectionRates] = useState(false);
   const exitTimerRef = useRef<number | null>(null);
   const observedChatMessageCount = useRef(chatMessages.length);
 
@@ -1115,10 +1168,40 @@ function RoomWorkspace({
               </motion.h1>
               <p className="truncate text-lg font-bold tracking-[0.06em] text-sky-100/65 sm:text-xl"># {roomId}</p>
             </div>
-            <p className="inline-flex items-center gap-1.5 text-xs font-bold tracking-[0.05em] text-emerald-300">
-              <RiLock2Fill aria-hidden="true" className="size-4" />
-              {connectionRoute === "relay" ? copy.encryptedRelay : copy.encrypted}
-            </p>
+            <Clickable
+              aria-label={showConnectionRates ? "Show connection quality" : "Show transfer rates"}
+              className="min-w-0"
+              hoverScale={1.025}
+              onClick={() => setShowConnectionRates((current) => !current)}
+              tapScale={0.98}
+            >
+              <AutoTransition as="span" className="inline-flex min-w-0 items-center" duration={0.2} presenceMode="wait" transitionKey={showConnectionRates ? "rates" : "connection"} type="fade">
+                {showConnectionRates ? <DataTransferStats mode="rates" transferred={progress.dataChannel.transferred} /> : (
+            <motion.div
+              layout="position"
+              className={`inline-flex min-w-0 items-center gap-1.5 text-xs font-bold tracking-[0.05em] ${progress.p2p.latency === undefined ? "text-slate-400" : latencyColor(progress.p2p.latency, true)}`}
+              transition={{ layout: { duration: 0.32, ease: "easeOut" } }}
+            >
+              <RiLock2Fill aria-hidden="true" className="size-4 shrink-0 text-emerald-300" />
+              <motion.span layout="position" className="whitespace-nowrap" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>
+                {connectionRoute === "relay" ? copy.encryptedRelay : copy.encrypted}
+              </motion.span>
+              <motion.span layout="position" className="text-slate-400/60" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>|</motion.span>
+              <SignalIcon className="size-4 shrink-0" level={signalLevel(progress.p2p.latency)} />
+              <NumberFlowGroup>
+                <motion.span
+                  layout="position"
+                  className="inline-flex shrink-0 items-baseline font-mono tabular-nums"
+                  transition={{ layout: { duration: 0.32, ease: "easeOut" } }}
+                >
+                  {progress.p2p.latency === undefined ? <motion.span layout="position">--</motion.span> : <NumberFlow value={Math.round(progress.p2p.latency)} willChange />}
+                  <motion.span layout="position" className="ml-1" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>ms</motion.span>
+                </motion.span>
+              </NumberFlowGroup>
+            </motion.div>
+                )}
+              </AutoTransition>
+            </Clickable>
           </header>
 
           <main className="relative min-h-0 flex-1">
