@@ -132,17 +132,17 @@ function DockItem({
             {/* Icon Container */}
             <motion.div
                 className={cn(
-                    "relative h-full w-full overflow-hidden rounded-xl bg-black/25",
+                    "relative h-full w-full overflow-hidden rounded-xl border border-white/10 bg-black/25",
                     "flex items-center justify-center",
                     "transition-all duration-200"
                 )}
                 animate={{
                     backgroundColor: item.tone === "danger"
-                        ? "rgba(136, 19, 55, 0.62)"
-                        : item.isActive ? `${activeColor}40` : item.running ? "rgba(52, 211, 153, 0.25)" : "rgba(0, 0, 0, 0.25)",
+                        ? "rgba(136, 19, 55, 0.45)"
+                        : item.isActive ? `${activeColor}33` : item.running ? "rgba(52, 211, 153, 0.25)" : "rgba(0, 0, 0, 0.25)",
                     borderColor: item.tone === "danger"
-                        ? "rgba(244, 63, 94, 0.68)"
-                        : item.isActive ? `${activeColor}40` : item.running ? "rgba(110, 231, 183, 0.24)" : "rgba(0, 0, 0, 0)",
+                        ? "rgba(244, 63, 94, 0.42)"
+                        : "rgba(255, 255, 255, 0.1)",
                     boxShadow: "0 0 0 rgba(0, 0, 0, 0)",
                 }}
                 transition={{ duration: 0.2, ease: "easeOut" }}

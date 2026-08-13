@@ -10,6 +10,7 @@ import {
   RiDownload2Line,
   RiEyeLine,
   RiErrorWarningLine,
+  RiEqualizerLine,
   RiExchange2Line,
   RiFileEditLine,
   RiFileCodeLine,
@@ -25,6 +26,9 @@ import {
   RiFolderTransferLine,
   RiGlobalLine,
   RiMicLine,
+  RiMic2Line,
+  RiMicOffLine,
+  RiMagicLine,
   RiPlayCircleLine,
   RiPulseLine,
   RiRadioButtonLine,
@@ -44,12 +48,13 @@ import {
   RiBrushLine,
   RiVideoOnLine,
   RiWifiLine,
+  RiVolumeUpLine,
 } from "@remixicon/react";
 import NumberFlow, { NumberFlowGroup } from "@number-flow/react";
 import { useNavigate } from "@tanstack/react-router";
 import cuid from "cuid";
 import { AnimatePresence, motion } from "framer-motion";
-import { type CSSProperties, type DragEventHandler, type ReactNode, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type DragEventHandler, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import Layout from "../components/Layout";
 import { useTheme } from "../components/theme";
@@ -59,6 +64,7 @@ import { Dialog, DialogClose, DialogContent } from "../components/ui/dialog";
 import { MagneticDock, type DockItemData } from "../components/ui/magnetic-dock";
 import { OverlayScrollbar } from "../components/ui/overlay-scrollbar";
 import { FileTransferManager, type FileTransferDiagnostics, type FileTransferSnapshot } from "../lib/file-transfer";
+import type { MediaTransport } from "../lib/media-transport";
 import {
   NativeWebRTCSession,
   type ConnectionRoute,
@@ -939,6 +945,332 @@ function ChatDeliveryStatus({ status }: { status: NonNullable<ChatMessage["deliv
   );
 }
 
+function AudioSpectrum({
+  accent,
+  active,
+  anchor,
+  stream,
+}: {
+  accent: string;
+  active: boolean;
+  anchor: "bottom" | "top";
+  stream?: MediaStream;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const track = stream?.getAudioTracks().find((candidate) => candidate.readyState === "live");
+    if (!canvas) return;
+
+    const audioContext = track ? new AudioContext() : null;
+    const analyser = audioContext?.createAnalyser();
+    const source = audioContext && track ? audioContext.createMediaStreamSource(new MediaStream([track])) : null;
+    const samples = new Uint8Array(1_024);
+    const levels = new Float32Array(48);
+    let frame = 0;
+
+    if (analyser && source && audioContext) {
+      analyser.fftSize = 2_048;
+      analyser.minDecibels = -96;
+      analyser.maxDecibels = -24;
+      analyser.smoothingTimeConstant = 0.8;
+      source.connect(analyser);
+      void audioContext.resume().catch(() => undefined);
+    }
+
+    const draw = () => {
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      const targetWidth = Math.max(1, Math.round(width * ratio));
+      const targetHeight = Math.max(1, Math.round(height * ratio));
+      if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+      }
+
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.clearRect(0, 0, width, height);
+      if (analyser && audioContext) analyser.getByteFrequencyData(samples);
+      const gap = Math.max(3, width / 190);
+      const barWidth = Math.max(2, (width - gap * (levels.length - 1)) / levels.length);
+      const maxHeight = height * 0.92;
+      const minFrequency = 20;
+      const maxFrequency = Math.min(20_000, (audioContext?.sampleRate ?? 48_000) / 2);
+      const frequencyPerBin = (audioContext?.sampleRate ?? 48_000) / (analyser?.fftSize ?? 2_048);
+      context.globalAlpha = active ? 1 : 0.42;
+
+      for (let index = 0; index < levels.length; index += 1) {
+        const lowFrequency = minFrequency * (maxFrequency / minFrequency) ** (index / levels.length);
+        const highFrequency = minFrequency * (maxFrequency / minFrequency) ** ((index + 1) / levels.length);
+        const start = Math.max(0, Math.floor(lowFrequency / frequencyPerBin));
+        const end = Math.min(samples.length, Math.max(start + 1, Math.ceil(highFrequency / frequencyPerBin)));
+        let peak = 0;
+        for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) peak = Math.max(peak, samples[sampleIndex]);
+        const target = active ? Math.pow(peak / 255, 0.58) : 0;
+        levels[index] += (target - levels[index]) * (target > levels[index] ? 0.34 : 0.12);
+        const barHeight = Math.max(4, levels[index] * maxHeight);
+        const x = index * (barWidth + gap);
+        const y = anchor === "top" ? 0 : height - barHeight;
+        context.fillStyle = anchor === "top" ? "rgb(224 242 254 / 0.25)" : `${accent}55`;
+        context.fillRect(x, y, barWidth, barHeight);
+      }
+
+      frame = window.requestAnimationFrame(draw);
+    };
+
+    draw();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      source?.disconnect();
+      analyser?.disconnect();
+      void audioContext?.close();
+    };
+  }, [accent, active, anchor, stream]);
+
+  return <div className="flex h-[clamp(8rem,28vh,13rem)] w-full shrink-0">
+    <canvas aria-label={anchor === "top" ? "Remote audio spectrum" : "Local audio spectrum"} className="size-full" ref={canvasRef} />
+  </div>;
+}
+
+function VoiceWorkspace({
+  accent,
+  locale,
+  microphoneActive,
+  microphoneError,
+  microphoneDeviceId,
+  microphonePending,
+  media,
+  noiseReductionActive,
+  onToggleNoiseReduction,
+  onSelectMicrophone,
+  onToggleMicrophone,
+  ready,
+  volume,
+  onVolumeChange,
+}: {
+  accent: string;
+  locale: RoomLocale;
+  microphoneActive: boolean;
+  microphoneError: string | null;
+  microphoneDeviceId: string | null;
+  microphonePending: boolean;
+  media: MediaTransport | null;
+  noiseReductionActive: boolean;
+  onToggleNoiseReduction: () => void;
+  onSelectMicrophone: (deviceId: string) => Promise<boolean>;
+  onToggleMicrophone: () => void;
+  ready: boolean;
+  volume: number;
+  onVolumeChange: (value: number) => void;
+}) {
+  const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
+  const [deviceDialogOpen, setDeviceDialogOpen] = useState(false);
+  const [deviceLoading, setDeviceLoading] = useState(false);
+  const [volumeDialogOpen, setVolumeDialogOpen] = useState(false);
+  const [mediaVersion, setMediaVersion] = useState(0);
+  const slotSignatureRef = useRef("");
+  const remoteStream = media?.getRemoteStream("camera-audio");
+  const localTrack = media?.getLocalTrack("camera-audio") ?? null;
+  const localStream = useMemo(() => localTrack ? new MediaStream([localTrack]) : undefined, [localTrack]);
+  const speakerActive = volume > 0;
+  const copy = locale === "zh"
+    ? {
+      local: "我",
+      noiseReduction: "降噪",
+      microphone: "麦克风",
+      microphoneInput: "选择麦克风",
+      microphoneOff: "开启麦克风",
+      microphoneOn: "关闭麦克风",
+      remote: "对方",
+      speaker: "扬声器",
+      voiceChanger: "变声器",
+      volume: "音量",
+    }
+    : {
+      local: "YOU",
+      noiseReduction: "Noise reduction",
+      microphone: "Microphone",
+      microphoneInput: "Choose microphone",
+      microphoneOff: "Turn microphone on",
+      microphoneOn: "Turn microphone off",
+      remote: "THEM",
+      speaker: "Speaker",
+      voiceChanger: "Voice changer",
+      volume: "Volume",
+    };
+
+  useEffect(() => {
+    if (!deviceDialogOpen) return;
+    let disposed = false;
+    const refreshInputs = async () => {
+      setDeviceLoading(true);
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        if (!disposed) setAudioInputs(devices.filter((device) => device.kind === "audioinput"));
+      } finally {
+        if (!disposed) setDeviceLoading(false);
+      }
+    };
+    void refreshInputs();
+    navigator.mediaDevices.addEventListener?.("devicechange", refreshInputs);
+    return () => {
+      disposed = true;
+      navigator.mediaDevices.removeEventListener?.("devicechange", refreshInputs);
+    };
+  }, [deviceDialogOpen]);
+
+  const selectMicrophone = async (deviceId: string) => {
+    if (await onSelectMicrophone(deviceId)) setDeviceDialogOpen(false);
+  };
+
+  useEffect(() => {
+    if (!media) return;
+    return media.subscribe((slots) => {
+      const signature = slots
+        .filter((slot) => slot.id === "camera-audio")
+        .map((slot) => `${slot.localState}:${slot.remoteState}:${slot.remoteStream?.id ?? ""}:${media.getLocalTrack(slot.id)?.id ?? ""}`)
+        .join("|");
+      if (signature === slotSignatureRef.current) return;
+      slotSignatureRef.current = signature;
+      setMediaVersion((version) => version + 1);
+    });
+  }, [media]);
+
+  return (
+    <WorkspaceShell
+      footer={(
+        <div className="flex h-full items-center justify-center gap-7 sm:gap-10">
+          <div className="flex flex-col items-center gap-2">
+            <Clickable
+              aria-label={copy.noiseReduction}
+              className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200"
+              disabled={!ready || !microphoneActive || microphonePending}
+              hoverScale={1.08}
+              onClick={onToggleNoiseReduction}
+              style={{ backgroundColor: noiseReductionActive ? `${accent}33` : "rgb(0 0 0 / 0.25)" }}
+              tapScale={0.94}
+            >
+              <RiEqualizerLine aria-hidden="true" className="size-7" />
+            </Clickable>
+            <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.noiseReduction}</span>
+          </div>
+          <div className="flex flex-col items-center gap-2">
+            <Clickable aria-label={copy.volume} className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200" hoverScale={1.08} onClick={() => setVolumeDialogOpen(true)} style={{ backgroundColor: speakerActive ? `${accent}33` : "rgb(0 0 0 / 0.25)" }} tapScale={0.94}>
+              <RiVolumeUpLine aria-hidden="true" className="size-7" />
+            </Clickable>
+            <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.speaker}</span>
+          </div>
+          <div className="flex flex-col items-center gap-2">
+            <Clickable
+              aria-label={microphoneActive ? copy.microphoneOn : copy.microphoneOff}
+              className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color,color,opacity] duration-200"
+              disabled={!ready || microphonePending}
+              hoverScale={1.08}
+              onClick={onToggleMicrophone}
+              tapScale={0.94}
+              style={{ backgroundColor: microphoneActive ? `${accent}33` : "rgb(0 0 0 / 0.25)" }}
+            >
+              <AutoTransition
+                as="span"
+                className="grid place-items-center"
+                duration={0.18}
+                presenceMode="wait"
+                transitionKey={microphoneActive ? "on" : "off"}
+                type="fade"
+              >
+                {microphoneActive
+                  ? <RiMicLine aria-hidden="true" className="size-8" />
+                  : <RiMicOffLine aria-hidden="true" className="size-8" />}
+              </AutoTransition>
+            </Clickable>
+            <AutoTransition as="span" className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55" duration={0.18} presenceMode="wait" transitionKey={microphoneActive ? "on" : "off"} type="fade">
+              {microphoneActive ? copy.microphoneOn : copy.microphoneOff}
+            </AutoTransition>
+          </div>
+          <div className="flex flex-col items-center gap-2">
+            <Clickable aria-label={copy.microphoneInput} className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50" disabled={!ready || !microphoneActive || microphonePending} hoverScale={1.08} onClick={() => setDeviceDialogOpen(true)} tapScale={0.94}>
+              <RiMic2Line aria-hidden="true" className="size-7" />
+            </Clickable>
+            <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.microphoneInput}</span>
+          </div>
+          <div className="flex flex-col items-center gap-2">
+            <Clickable aria-label={copy.voiceChanger} className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50" disabled hoverScale={1.08} tapScale={0.94}>
+              <RiMagicLine aria-hidden="true" className="size-7" />
+            </Clickable>
+            <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.voiceChanger}</span>
+          </div>
+        </div>
+      )}
+      status={microphoneError ? (
+        <AutoTransition
+          aria-live="polite"
+          className="absolute bottom-full left-4 mb-3 text-xs font-medium tracking-[0.04em] text-rose-200/70"
+          duration={0.2}
+          transitionKey={microphoneError}
+          type="fade"
+        >
+          {microphoneError}
+        </AutoTransition>
+      ) : undefined}
+      scrollKey={mediaVersion}
+    >
+      <div className="flex min-h-full flex-col justify-between px-2">
+        <AudioSpectrum accent={accent} active={Boolean(remoteStream)} anchor="top" stream={remoteStream} />
+        <AudioSpectrum accent={accent} active={microphoneActive} anchor="bottom" stream={localStream} />
+      </div>
+      <Dialog open={volumeDialogOpen} onOpenChange={setVolumeDialogOpen}>
+        <DialogContent aria-labelledby="voice-volume-title" className="!max-w-md">
+          <div className="p-6 sm:p-7">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.speaker}</p>
+                <h2 id="voice-volume-title" className="mt-2 text-2xl font-bold tracking-[0.04em] text-sky-50">{copy.volume}</h2>
+              </div>
+              <DialogClose aria-label={locale === "zh" ? "关闭" : "Close"} />
+            </div>
+            <div className="mt-8 flex items-center gap-4">
+              <RiVolumeUpLine aria-hidden="true" className="size-5 shrink-0 text-sky-100/65" />
+              <input aria-label={copy.volume} className="h-1.5 w-full cursor-pointer accent-sky-300" max="1" min="0" onChange={(event) => onVolumeChange(Number(event.target.value))} step="0.01" type="range" value={volume} />
+              <NumberFlowGroup>
+                <span className="inline-flex w-10 items-baseline justify-end text-right text-sm font-semibold tabular-nums text-sky-100/70">
+                  <NumberFlow value={Math.round(volume * 100)} willChange />
+                  <span>%</span>
+                </span>
+              </NumberFlowGroup>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={deviceDialogOpen} onOpenChange={setDeviceDialogOpen}>
+        <DialogContent aria-labelledby="voice-device-title" className="!max-w-md">
+          <div className="p-6 sm:p-7">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.microphone}</p>
+                <h2 id="voice-device-title" className="mt-2 text-2xl font-bold tracking-[0.04em] text-sky-50">{copy.microphoneInput}</h2>
+              </div>
+              <DialogClose aria-label={locale === "zh" ? "关闭" : "Close"} />
+            </div>
+            <div className="mt-7 divide-y divide-white/10 border-y border-white/10">
+              {deviceLoading ? <p className="py-4 text-sm font-medium text-sky-100/50">{locale === "zh" ? "正在查找设备" : "Looking for devices"}</p> : audioInputs.map((device, index) => (
+                <button className="flex w-full items-center justify-between gap-4 py-4 text-left text-sm font-semibold tracking-[0.03em] text-sky-100/75 transition-colors hover:text-sky-50" key={device.deviceId || index} onClick={() => void selectMicrophone(device.deviceId)} type="button">
+                  <span className="truncate">{device.label || `${copy.microphone} ${index + 1}`}</span>
+                  {device.deviceId === microphoneDeviceId ? <RiCheckLine aria-hidden="true" className="size-5 shrink-0 text-sky-200" /> : null}
+                </button>
+              ))}
+              {!deviceLoading && audioInputs.length === 0 ? <p className="py-4 text-sm font-medium text-sky-100/50">{locale === "zh" ? "未发现可用麦克风" : "No microphone found"}</p> : null}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </WorkspaceShell>
+  );
+}
+
 function fileIcon(name: string) {
   const extension = name.split(".").pop()?.toLowerCase() ?? "";
   if (["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "heic"].includes(extension)) return RiFileImageLine;
@@ -1197,12 +1529,24 @@ function RoomWorkspace({
   onOfferFiles,
   onPauseFile,
   onResendFile,
+  microphoneActive,
+  microphoneDeviceId,
+  microphoneError,
+  microphonePending,
+  media,
+  noiseReductionActive,
+  onToggleNoiseReduction,
+  onSelectMicrophone,
+  onToggleMicrophone,
+  volume,
+  onVolumeChange,
   peerTyping,
   open,
   progress,
   roomId,
   connectionRoute,
   onSendChatMessage,
+  voiceActive,
 }: {
   chatMessages: ChatMessage[];
   fileTransfers: FileTransferSnapshot[];
@@ -1219,12 +1563,24 @@ function RoomWorkspace({
   onOfferFiles: (files: FileList | File[]) => void;
   onPauseFile: (id: string) => void;
   onResendFile: (id: string) => void;
+  microphoneActive: boolean;
+  microphoneDeviceId: string | null;
+  microphoneError: string | null;
+  microphonePending: boolean;
+  media: MediaTransport | null;
+  noiseReductionActive: boolean;
+  onToggleNoiseReduction: () => void;
+  onSelectMicrophone: (deviceId: string) => Promise<boolean>;
+  onToggleMicrophone: () => void;
+  volume: number;
+  onVolumeChange: (value: number) => void;
   peerTyping: boolean;
   open: boolean;
   progress: ConnectionProgress;
   roomId: string;
   connectionRoute: ConnectionRoute;
   onSendChatMessage: (text: string) => boolean;
+  voiceActive: boolean;
 }) {
   const copy = roomCopy[locale];
   const { theme } = useTheme();
@@ -1289,7 +1645,9 @@ function RoomWorkspace({
       id: workspaceId,
       isActive: activeWorkspace === workspaceId,
       label: workspace.apps[workspaceId][0],
-      running: workspaceId === "files" && activeWorkspace !== "files" && fileRunning,
+      running: workspaceId === "files"
+        ? activeWorkspace !== "files" && fileRunning
+        : workspaceId === "voice" && activeWorkspace !== "voice" && voiceActive,
       onClick: () => activateWorkspace(workspaceId),
     };
   });
@@ -1381,7 +1739,7 @@ function RoomWorkspace({
                 const isRunning = runningWorkspaces.includes(activeWorkspace);
 
                 return (
-                  <section className={activeWorkspace === "chat" || activeWorkspace === "files" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
+                  <section className={activeWorkspace === "chat" || activeWorkspace === "files" || activeWorkspace === "voice" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
                     {activeWorkspace === "chat" ? (
                       <ChatWorkspace
                         accent={theme.accent}
@@ -1397,6 +1755,23 @@ function RoomWorkspace({
                       />
                     ) : activeWorkspace === "files" ? (
                       <FileWorkspace accent={theme.accent} files={fileTransfers} locale={locale} onAccept={onAcceptFile} onCancel={onCancelFile} onDelete={onDeleteFile} onDiagnostics={onFileDiagnostics} onDownload={onDownloadFile} onOffer={onOfferFiles} onPause={onPauseFile} onResend={onResendFile} ready={progress.dataChannel.state === "active"} />
+                    ) : activeWorkspace === "voice" ? (
+                      <VoiceWorkspace
+                        accent={theme.accent}
+                        locale={locale}
+                        media={media}
+                        microphoneActive={microphoneActive}
+                        microphoneDeviceId={microphoneDeviceId}
+                        microphoneError={microphoneError}
+                        microphonePending={microphonePending}
+                        noiseReductionActive={noiseReductionActive}
+                        onToggleNoiseReduction={onToggleNoiseReduction}
+                        onSelectMicrophone={onSelectMicrophone}
+                        onToggleMicrophone={onToggleMicrophone}
+                        ready={progress.dataChannel.state === "active"}
+                        volume={volume}
+                        onVolumeChange={onVolumeChange}
+                      />
                     ) : activeWorkspace === "status" ? (
                       <div className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
                         <OverlayScrollbar
@@ -1526,11 +1901,23 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const [connectionRoute, setConnectionRoute] = useState<ConnectionRoute>("direct");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [fileTransfers, setFileTransfers] = useState<FileTransferSnapshot[]>([]);
+  const [mediaTransport, setMediaTransport] = useState<MediaTransport | null>(null);
+  const [microphoneActive, setMicrophoneActive] = useState(false);
+  const [microphoneDeviceId, setMicrophoneDeviceId] = useState<string | null>(null);
+  const [microphoneError, setMicrophoneError] = useState<string | null>(null);
+  const [microphonePending, setMicrophonePending] = useState(false);
+  const [noiseReductionActive, setNoiseReductionActive] = useState(true);
+  const [remoteVoiceActive, setRemoteVoiceActive] = useState(false);
+  const [remoteAudioVersion, setRemoteAudioVersion] = useState(0);
+  const [speakerVolume, setSpeakerVolume] = useState(1);
   const [peerTyping, setPeerTyping] = useState(false);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const fileTransfersRef = useRef<FileTransferSnapshot[]>([]);
   const fileTransferRefreshTimerRef = useRef<number | null>(null);
   const peerTypingTimerRef = useRef<number | null>(null);
+  const reconnectDialogTimerRef = useRef<number | null>(null);
+  const rawMicrophoneTrackRef = useRef<MediaStreamTrack | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const [progress, setProgress] = useState<ConnectionProgress>({
     websocket: { state: "pending", detail: "Waiting for signaling socket" },
     resource: { state: "pending", detail: "Waiting to request Cloudflare resources" },
@@ -1593,6 +1980,27 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     });
   };
 
+  useEffect(() => () => {
+    if (reconnectDialogTimerRef.current !== null) window.clearTimeout(reconnectDialogTimerRef.current);
+  }, []);
+
+  const resumeRemoteAudio = () => {
+    const audio = remoteAudioRef.current;
+    if (!audio) return;
+    void audio.play().catch(() => undefined);
+  };
+
+  useEffect(() => {
+    const audio = remoteAudioRef.current;
+    const remoteStream = mediaTransport?.getRemoteStream("camera-audio");
+    if (!audio) return;
+    audio.autoplay = true;
+    audio.muted = false;
+    audio.volume = speakerVolume;
+    if (audio.srcObject !== remoteStream) audio.srcObject = remoteStream ?? null;
+    resumeRemoteAudio();
+  }, [mediaTransport, remoteAudioVersion, speakerVolume]);
+
   useEffect(() => {
     const session = new NativeWebRTCSession(
       roomId,
@@ -1620,6 +2028,11 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         setError("Data channel failed.");
         setConnectionRoute("direct");
         setDialogPhase("closing-for-reconnect");
+        if (reconnectDialogTimerRef.current !== null) window.clearTimeout(reconnectDialogTimerRef.current);
+        reconnectDialogTimerRef.current = window.setTimeout(() => {
+          reconnectDialogTimerRef.current = null;
+          setDialogPhase((current) => current === "closing-for-reconnect" ? "connecting" : current);
+        }, 300);
       },
       setConnectionRoute,
       (message) => {
@@ -1650,6 +2063,15 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       },
     );
     sessionRef.current = session;
+    setMediaTransport(session.media);
+    const unsubscribeMedia = session.media.subscribe((slots) => {
+      const remoteAudio = slots.find((slot) => slot.id === "camera-audio");
+      setRemoteAudioVersion((version) => version + 1);
+      setRemoteVoiceActive((current) => {
+        const next = remoteAudio?.remoteState === "live";
+        return current === next ? current : next;
+      });
+    });
     session.attachFileTransferManager(fileManagerRef.current);
     session.connect();
 
@@ -1657,7 +2079,17 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       if (peerTypingTimerRef.current !== null) window.clearTimeout(peerTypingTimerRef.current);
       peerTypingTimerRef.current = null;
       session.close();
+      unsubscribeMedia();
+      rawMicrophoneTrackRef.current?.stop();
+      rawMicrophoneTrackRef.current = null;
       sessionRef.current = null;
+      setMediaTransport(null);
+      setMicrophoneActive(false);
+      setMicrophoneDeviceId(null);
+      setMicrophonePending(false);
+      setNoiseReductionActive(true);
+      setRemoteVoiceActive(false);
+      setSpeakerVolume(1);
     };
   }, [roomId]);
 
@@ -1731,6 +2163,116 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     if (sessionRef.current?.sendChatTyping()) lastTypingSentAtRef.current = now;
   };
 
+  const toggleMicrophone = async () => {
+    resumeRemoteAudio();
+    const media = sessionRef.current?.media;
+    if (!media || microphonePending) return;
+
+    setMicrophonePending(true);
+    setMicrophoneError(null);
+    try {
+      const existingTrack = media.getLocalTrack("camera-audio");
+      if (existingTrack) {
+        const removed = await media.replaceLocalTrack("camera-audio", null, "ended");
+        if (!removed) throw new Error(locale === "zh" ? "无法关闭麦克风。" : "Could not turn off the microphone.");
+        existingTrack.stop();
+        const rawTrack = rawMicrophoneTrackRef.current;
+        if (rawTrack && rawTrack !== existingTrack) rawTrack.stop();
+        rawMicrophoneTrackRef.current = null;
+        setMicrophoneActive(false);
+        setMicrophoneDeviceId(null);
+        return;
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          autoGainControl: noiseReductionActive,
+          echoCancellation: true,
+          noiseSuppression: noiseReductionActive,
+        },
+        video: false,
+      });
+      const track = stream.getAudioTracks()[0];
+      if (!track) throw new Error(locale === "zh" ? "没有检测到可用麦克风。" : "No microphone was detected.");
+      const attached = await media.replaceLocalTrack("camera-audio", track, "live");
+      if (!attached) {
+        track.stop();
+        throw new Error(locale === "zh" ? "无法将麦克风接入端对端连接。" : "Could not add the microphone to the peer-to-peer connection.");
+      }
+      track.addEventListener("ended", () => setMicrophoneActive(false), { once: true });
+      rawMicrophoneTrackRef.current = track;
+      setMicrophoneActive(true);
+      setMicrophoneDeviceId(track.getSettings().deviceId ?? null);
+    } catch (cause) {
+      setMicrophoneActive(false);
+      setMicrophoneError(cause instanceof Error ? cause.message : locale === "zh" ? "无法开启麦克风。" : "Could not turn on the microphone.");
+    } finally {
+      setMicrophonePending(false);
+    }
+  };
+
+  const selectMicrophone = async (deviceId: string): Promise<boolean> => {
+    const media = sessionRef.current?.media;
+    if (!media || microphonePending) return false;
+
+    setMicrophonePending(true);
+    setMicrophoneError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          autoGainControl: noiseReductionActive,
+          deviceId: { exact: deviceId },
+          echoCancellation: true,
+          noiseSuppression: noiseReductionActive,
+        },
+        video: false,
+      });
+      const replacement = stream.getAudioTracks()[0];
+      if (!replacement) throw new Error(locale === "zh" ? "没有检测到可用麦克风。" : "No microphone was detected.");
+      const previous = media.getLocalTrack("camera-audio");
+      const previousRawTrack = rawMicrophoneTrackRef.current;
+      const attached = await media.replaceLocalTrack("camera-audio", replacement, "live");
+      if (!attached) {
+        replacement.stop();
+        throw new Error(locale === "zh" ? "无法切换麦克风。" : "Could not switch microphones.");
+      }
+      previous?.stop();
+      if (previousRawTrack && previousRawTrack !== previous) previousRawTrack.stop();
+      rawMicrophoneTrackRef.current = replacement;
+      replacement.addEventListener("ended", () => setMicrophoneActive(false), { once: true });
+      setMicrophoneActive(true);
+      setMicrophoneDeviceId(replacement.getSettings().deviceId ?? deviceId);
+      return true;
+    } catch (cause) {
+      setMicrophoneError(cause instanceof Error ? cause.message : locale === "zh" ? "无法切换麦克风。" : "Could not switch microphones.");
+      return false;
+    } finally {
+      setMicrophonePending(false);
+    }
+  };
+
+  const toggleNoiseReduction = async () => {
+    const track = rawMicrophoneTrackRef.current ?? sessionRef.current?.media.getLocalTrack("camera-audio");
+    if (!track || microphonePending) return;
+
+    const next = !noiseReductionActive;
+    setMicrophonePending(true);
+    setMicrophoneError(null);
+    try {
+      await track.applyConstraints({
+        advanced: [{
+          autoGainControl: next,
+          noiseSuppression: next,
+        }],
+      });
+      setNoiseReductionActive(next);
+    } catch (cause) {
+      setMicrophoneError(cause instanceof Error ? cause.message : locale === "zh" ? "无法修改降噪设置。" : "Could not update noise reduction.");
+    } finally {
+      setMicrophonePending(false);
+    }
+  };
+
   useEffect(() => {
     const timer = window.setInterval(() => {
       const timeoutAt = Date.now() - 12_000;
@@ -1744,6 +2286,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
 
   return (
     <Layout title={dialogPhase === "ready" ? roomCopy[locale].roomTitle(roomId) : roomCopy[locale].pageTitle(roomId)}>
+      <div className="contents" onClickCapture={resumeRemoteAudio}>
+      <audio className="sr-only" autoPlay playsInline ref={remoteAudioRef} />
       {dialogPhase === "full" ? (
         <RoomFullContent locale={locale} onLeave={leave} roomId={roomId} />
       ) : dialogPhase === "ready" || dialogPhase === "closing-for-reconnect" ? (
@@ -1751,9 +2295,6 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
           chatMessages={chatMessages}
           fileTransfers={fileTransfers}
           locale={locale}
-          onExitComplete={() => {
-            if (dialogPhase === "closing-for-reconnect") setDialogPhase("connecting");
-          }}
           onLeave={leave}
           onChatTyping={sendChatTyping}
           onAcceptFile={acceptFile}
@@ -1764,13 +2305,25 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
           onOfferFiles={offerFiles}
           onPauseFile={pauseFile}
           onResendFile={resendFile}
+          media={mediaTransport}
+          microphoneActive={microphoneActive}
+          microphoneDeviceId={microphoneDeviceId}
+          microphoneError={microphoneError}
+          microphonePending={microphonePending}
+          noiseReductionActive={noiseReductionActive}
           onMarkChatMessageRead={markChatMessageRead}
           onSendChatMessage={sendChatMessage}
+          onToggleNoiseReduction={toggleNoiseReduction}
+          onSelectMicrophone={selectMicrophone}
+          onToggleMicrophone={toggleMicrophone}
+          volume={speakerVolume}
+          onVolumeChange={setSpeakerVolume}
           open={dialogPhase === "ready"}
           peerTyping={peerTyping}
           progress={progress}
           roomId={roomId}
           connectionRoute={connectionRoute}
+          voiceActive={microphoneActive || remoteVoiceActive}
         />
       ) : (
         <ConnectionDialog
@@ -1787,6 +2340,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
           roomId={roomId}
         />
       )}
+      </div>
     </Layout>
   );
 }
