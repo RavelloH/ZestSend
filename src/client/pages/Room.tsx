@@ -46,6 +46,11 @@ import {
   RiLock2Fill,
   RiLoader4Line,
   RiBrushLine,
+  RiCameraLine,
+  RiCameraOffLine,
+  RiCameraSwitchLine,
+  RiComputerLine,
+  RiSettings3Line,
   RiVideoOnLine,
   RiWifiLine,
   RiVolumeUpLine,
@@ -1036,6 +1041,259 @@ function AudioSpectrum({
   </div>;
 }
 
+type VideoQuality = "low" | "balanced" | "high";
+
+type VideoTile = {
+  id: "remote-camera" | "remote-screen" | "local-camera" | "local-screen";
+  label: string;
+  muted: boolean;
+  stream: MediaStream;
+};
+
+function VideoStream({ className, muted, stream }: { className?: string; muted?: boolean; stream: MediaStream }) {
+  const ref = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    if (element.srcObject !== stream) element.srcObject = stream;
+    void element.play().catch(() => undefined);
+  }, [stream]);
+
+  return <video autoPlay className={className} muted={muted} playsInline ref={ref} />;
+}
+
+function VideoShell({ children, footer }: { children: ReactNode; footer: ReactNode }) {
+  return <section className="flex h-full min-h-0 w-full flex-col pb-[clamp(6rem,7vh,7rem)] pt-6">
+    <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+    <div className="mx-auto w-full max-w-2xl lg:max-w-3xl">
+      <form className="relative shrink-0 border-t border-white/10 pt-4" onSubmit={(event) => event.preventDefault()}>
+        <div className={workspaceComposerClassName}>{footer}</div>
+      </form>
+    </div>
+  </section>;
+}
+
+function VideoWorkspace({
+  accent,
+  cameraActive,
+  cameraDeviceId,
+  locale,
+  media,
+  onSelectCamera,
+  onToggleCamera,
+  onToggleScreenShare,
+  onUpdateVideoQuality,
+  quality,
+  ready,
+  screenShareActive,
+  screenAudioFallbackOpen,
+  onCloseScreenAudioFallback,
+  onShareScreenWithoutAudio,
+  screenShareVolume,
+  speakerVolume,
+  onScreenShareVolumeChange,
+  onSpeakerVolumeChange,
+}: {
+  accent: string;
+  cameraActive: boolean;
+  cameraDeviceId: string | null;
+  locale: RoomLocale;
+  media: MediaTransport | null;
+  onSelectCamera: (deviceId: string) => Promise<boolean>;
+  onToggleCamera: () => void;
+  onToggleScreenShare: () => void;
+  onUpdateVideoQuality: (quality: VideoQuality) => void;
+  quality: VideoQuality;
+  ready: boolean;
+  screenShareActive: boolean;
+  screenAudioFallbackOpen: boolean;
+  onCloseScreenAudioFallback: () => void;
+  onShareScreenWithoutAudio: () => void;
+  screenShareVolume: number;
+  speakerVolume: number;
+  onScreenShareVolumeChange: (value: number) => void;
+  onSpeakerVolumeChange: (value: number) => void;
+}) {
+  const [cameraInputs, setCameraInputs] = useState<MediaDeviceInfo[]>([]);
+  const [cameraDialogOpen, setCameraDialogOpen] = useState(false);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [volumeDialogOpen, setVolumeDialogOpen] = useState(false);
+  const [mediaVersion, setMediaVersion] = useState(0);
+  const [primaryId, setPrimaryId] = useState<VideoTile["id"] | null>(null);
+  const signatureRef = useRef("");
+  const localStreamsRef = useRef(new Map<"camera-video" | "screen-video", MediaStream>());
+  const copy = locale === "zh" ? {
+    camera: "摄像头",
+    cameraOff: "打开摄像头",
+    cameraOn: "关闭摄像头",
+    chooseCamera: "选择摄像头",
+    noVideo: "尚未有视频流",
+    quality: "视频设置",
+    qualityDescription: "带宽不足时会由浏览器自动降低实际编码质量。",
+    screen: "屏幕共享",
+    screenOff: "开始共享",
+    screenOn: "停止共享",
+    screenVolume: "屏幕共享音量",
+    speaker: "扬声器",
+    videoQuality: "目标视频质量",
+    voiceVolume: "语音音量",
+    localCamera: "我的视频",
+    localScreen: "我的屏幕",
+    remoteCamera: "对方视频",
+    remoteScreen: "对方屏幕",
+    low: "流畅",
+    balanced: "均衡",
+    high: "高清",
+  } : {
+    camera: "Camera",
+    cameraOff: "Turn camera on",
+    cameraOn: "Turn camera off",
+    chooseCamera: "Choose camera",
+    noVideo: "No video stream yet",
+    quality: "Video settings",
+    qualityDescription: "The browser automatically reduces the actual encode quality when bandwidth is limited.",
+    screen: "Screen share",
+    screenOff: "Start sharing",
+    screenOn: "Stop sharing",
+    screenVolume: "Screen-share volume",
+    speaker: "Speaker",
+    videoQuality: "Target video quality",
+    voiceVolume: "Voice volume",
+    localCamera: "YOUR VIDEO",
+    localScreen: "YOUR SCREEN",
+    remoteCamera: "THEIR VIDEO",
+    remoteScreen: "THEIR SCREEN",
+    low: "Smooth",
+    balanced: "Balanced",
+    high: "High definition",
+  };
+
+  useEffect(() => {
+    if (!cameraDialogOpen) return;
+    let cancelled = false;
+    const refresh = async () => {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      if (!cancelled) setCameraInputs(devices.filter((device) => device.kind === "videoinput"));
+    };
+    void refresh();
+    navigator.mediaDevices.addEventListener?.("devicechange", refresh);
+    return () => {
+      cancelled = true;
+      navigator.mediaDevices.removeEventListener?.("devicechange", refresh);
+    };
+  }, [cameraDialogOpen]);
+
+  useEffect(() => {
+    if (!media) return;
+    return media.subscribe((slots) => {
+      const signature = slots
+        .filter((slot) => slot.id === "camera-video" || slot.id === "screen-video")
+        .map((slot) => `${slot.id}:${slot.localState}:${slot.remoteState}:${slot.remoteStream?.id ?? ""}:${media.getLocalTrack(slot.id)?.id ?? ""}`)
+        .join("|");
+      if (signature === signatureRef.current) return;
+      signatureRef.current = signature;
+      setMediaVersion((value) => value + 1);
+    });
+  }, [media]);
+
+  const tiles = useMemo<VideoTile[]>(() => {
+    const remoteCamera = media?.getRemoteStream("camera-video");
+    const remoteScreen = media?.getRemoteStream("screen-video");
+    const localCamera = media?.getLocalTrack("camera-video");
+    const localScreen = media?.getLocalTrack("screen-video");
+    const localStream = (id: "camera-video" | "screen-video", track: MediaStreamTrack | null) => {
+      if (!track) {
+        localStreamsRef.current.delete(id);
+        return undefined;
+      }
+      const current = localStreamsRef.current.get(id);
+      if (current?.getVideoTracks()[0] === track) return current;
+      const stream = new MediaStream([track]);
+      localStreamsRef.current.set(id, stream);
+      return stream;
+    };
+    const localCameraStream = localStream("camera-video", localCamera ?? null);
+    const localScreenStream = localStream("screen-video", localScreen ?? null);
+    return [
+      remoteCamera ? { id: "remote-camera", label: copy.remoteCamera, muted: false, stream: remoteCamera } : null,
+      remoteScreen ? { id: "remote-screen", label: copy.remoteScreen, muted: false, stream: remoteScreen } : null,
+      localCameraStream ? { id: "local-camera", label: copy.localCamera, muted: true, stream: localCameraStream } : null,
+      localScreenStream ? { id: "local-screen", label: copy.localScreen, muted: true, stream: localScreenStream } : null,
+    ].filter((tile): tile is VideoTile => tile !== null);
+  }, [copy.localCamera, copy.localScreen, copy.remoteCamera, copy.remoteScreen, media, mediaVersion]);
+  const primary = tiles.find((tile) => tile.id === primaryId) ?? tiles[0];
+  const secondary = tiles.filter((tile) => tile.id !== primary?.id);
+  const secondarySpan = secondary.length === 1 ? "col-span-6 mx-auto w-full max-w-md" : secondary.length === 2 ? "col-span-3" : "col-span-2";
+  const speakerActive = speakerVolume > 0 || screenShareVolume > 0;
+
+  return <VideoShell
+    footer={<div className="flex h-full items-center justify-center gap-7 sm:gap-10">
+      {[
+        { active: screenShareActive, icon: RiComputerLine, label: screenShareActive ? copy.screenOn : copy.screen, onClick: onToggleScreenShare },
+        { active: speakerActive, icon: RiVolumeUpLine, label: copy.speaker, onClick: () => setVolumeDialogOpen(true) },
+        { active: cameraActive, icon: cameraActive ? RiCameraOffLine : RiCameraLine, label: cameraActive ? copy.cameraOn : copy.cameraOff, onClick: onToggleCamera },
+        { active: Boolean(cameraDeviceId), icon: RiCameraSwitchLine, label: copy.chooseCamera, onClick: () => setCameraDialogOpen(true) },
+        { active: false, icon: RiSettings3Line, label: copy.quality, onClick: () => setSettingsDialogOpen(true) },
+      ].map(({ active, icon: Icon, label, onClick }) => <div className="flex flex-col items-center gap-2" key={label}>
+        <Clickable
+          aria-label={label}
+          className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200"
+          disabled={!ready}
+          hoverScale={1.08}
+          onClick={onClick}
+          style={{ backgroundColor: active ? `${accent}33` : "rgb(0 0 0 / 0.25)" }}
+          tapScale={0.94}
+        ><Icon aria-hidden="true" className="size-7" /></Clickable>
+        <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{label}</span>
+      </div>)}
+    </div>}
+  >
+    <div className="flex h-full min-h-0 items-center justify-center px-2 py-3">
+      {!primary ? <div className="text-center text-sky-100/45"><RiVideoOnLine aria-hidden="true" className="mx-auto size-12" /><p className="mt-4 text-sm font-semibold tracking-[0.05em]">{copy.noVideo}</p></div> : (
+        <motion.div
+          className="grid h-full min-h-0 w-full max-w-5xl grid-cols-6 gap-2.5"
+          layout
+          style={{ gridTemplateRows: secondary.length > 0 ? "minmax(0, 1fr) clamp(4.5rem, 15vh, 9rem)" : "minmax(0, 1fr)" }}
+          transition={{ layout: { damping: 30, mass: 0.8, stiffness: 280, type: "spring" } }}
+        >
+          {[primary, ...secondary].map((tile) => {
+            const isPrimary = tile.id === primary.id;
+            return <motion.button
+              aria-label={isPrimary ? tile.label : `${locale === "zh" ? "切换到主画面：" : "Make primary: "}${tile.label}`}
+              className={`relative flex min-h-0 items-center justify-center overflow-hidden bg-black/30 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60 ${isPrimary ? "col-span-6 row-start-1 cursor-default rounded-2xl shadow-2xl shadow-black/15" : `${secondarySpan} row-start-2 cursor-pointer rounded-xl shadow-xl shadow-black/10`}`}
+              key={tile.id}
+              layout
+              onClick={() => { if (!isPrimary) setPrimaryId(tile.id); }}
+              transition={{ layout: { damping: 30, mass: 0.8, stiffness: 280, type: "spring" } }}
+              type="button"
+            >
+              <VideoStream className="block h-auto max-h-full w-auto max-w-full object-contain" muted={tile.muted} stream={tile.stream} />
+              <span className={`${isPrimary ? "left-3 top-3 px-2 py-1 text-xs" : "left-2 top-2 px-1.5 py-0.5 text-[10px]"} absolute rounded-md bg-black/35 font-bold tracking-[0.08em] text-sky-50/80`}>{tile.label}</span>
+            </motion.button>;
+          })}
+        </motion.div>
+      )}
+    </div>
+    <Dialog open={screenAudioFallbackOpen} onOpenChange={(open) => { if (!open) onCloseScreenAudioFallback(); }}>
+      <DialogContent aria-labelledby="screen-audio-fallback-title" className="!max-w-md">
+        <div className="p-7 sm:p-8">
+          <RiVolumeUpLine aria-hidden="true" className="size-9" style={{ color: accent }} />
+          <h2 className="mt-5 text-2xl font-bold tracking-[0.04em] text-sky-50" id="screen-audio-fallback-title">{locale === "zh" ? "无法共享系统音频" : "System audio is unavailable"}</h2>
+          <p className="mt-3 text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/60">{locale === "zh" ? "当前浏览器或系统无法启动系统音频源。是否仅共享视频画面？" : "The browser or operating system could not start system audio. Share the screen without audio instead?"}</p>
+          <div className="mt-8 grid grid-cols-2 gap-3">
+            <Clickable className="glass !h-12 rounded-xl border border-white/10 text-base font-semibold text-sky-100/75" hoverScale={1.02} onClick={onCloseScreenAudioFallback} tapScale={0.97}>{locale === "zh" ? "取消" : "Cancel"}</Clickable>
+            <Clickable className="!h-12 rounded-xl border border-sky-200/25 text-base font-semibold text-sky-50" hoverScale={1.02} onClick={onShareScreenWithoutAudio} style={{ backgroundColor: `${accent}33` }} tapScale={0.97}>{locale === "zh" ? "仅共享视频" : "Share video only"}</Clickable>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={volumeDialogOpen} onOpenChange={setVolumeDialogOpen}><DialogContent aria-labelledby="video-volume-title" className="!max-w-md"><div className="p-6 sm:p-7"><div className="flex items-center justify-between gap-4"><div><p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.speaker}</p><h2 className="mt-2 text-2xl font-bold tracking-[0.04em] text-sky-50" id="video-volume-title">{copy.speaker}</h2></div><DialogClose aria-label={locale === "zh" ? "关闭" : "Close"} /></div>{[[copy.voiceVolume, speakerVolume, onSpeakerVolumeChange], [copy.screenVolume, screenShareVolume, onScreenShareVolumeChange]].map(([label, value, change]) => <label className="mt-7 flex items-center gap-4" key={label as string}><span className="w-28 shrink-0 text-sm font-semibold text-sky-100/65">{label as string}</span><input aria-label={label as string} className="h-1.5 w-full cursor-pointer accent-sky-300" max="1" min="0" onChange={(event) => (change as (value: number) => void)(Number(event.target.value))} step="0.01" type="range" value={value as number} /><NumberFlowGroup><span className="inline-flex w-10 items-baseline justify-end text-sm font-semibold tabular-nums text-sky-100/70"><NumberFlow value={Math.round((value as number) * 100)} willChange /><span>%</span></span></NumberFlowGroup></label>)}</div></DialogContent></Dialog>
+    <Dialog open={cameraDialogOpen} onOpenChange={setCameraDialogOpen}><DialogContent aria-labelledby="video-camera-title" className="!max-w-md"><div className="p-6 sm:p-7"><div className="flex items-center justify-between gap-4"><div><p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.camera}</p><h2 className="mt-2 text-2xl font-bold tracking-[0.04em] text-sky-50" id="video-camera-title">{copy.chooseCamera}</h2></div><DialogClose aria-label={locale === "zh" ? "关闭" : "Close"} /></div><div className="mt-7 divide-y divide-white/10 border-y border-white/10">{cameraInputs.map((device, index) => <button className="flex w-full items-center justify-between gap-4 py-4 text-left text-sm font-semibold tracking-[0.03em] text-sky-100/75 transition-colors hover:text-sky-50" key={device.deviceId || index} onClick={() => void onSelectCamera(device.deviceId).then(() => setCameraDialogOpen(false))} type="button"><span className="truncate">{device.label || `${copy.camera} ${index + 1}`}</span>{device.deviceId === cameraDeviceId ? <RiCheckLine aria-hidden="true" className="size-5 shrink-0 text-sky-200" /> : null}</button>)}{cameraInputs.length === 0 ? <p className="py-4 text-sm font-medium text-sky-100/50">{locale === "zh" ? "未发现可用摄像头" : "No camera found"}</p> : null}</div></div></DialogContent></Dialog>
+    <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}><DialogContent aria-labelledby="video-settings-title" className="!max-w-md"><div className="p-6 sm:p-7"><div className="flex items-center justify-between gap-4"><div><p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.quality}</p><h2 className="mt-2 text-2xl font-bold tracking-[0.04em] text-sky-50" id="video-settings-title">{copy.videoQuality}</h2></div><DialogClose aria-label={locale === "zh" ? "关闭" : "Close"} /></div><p className="mt-3 text-sm leading-relaxed text-sky-100/55">{copy.qualityDescription}</p><div className="mt-7 grid grid-cols-3 gap-2">{(["low", "balanced", "high"] as VideoQuality[]).map((option) => <Clickable className="glass !h-11 rounded-xl border border-white/10 text-sm font-semibold text-sky-100/75" hoverScale={1.02} key={option} onClick={() => { onUpdateVideoQuality(option); setSettingsDialogOpen(false); }} style={{ backgroundColor: option === quality ? `${accent}33` : "rgb(0 0 0 / 0.25)" }} tapScale={0.97}>{copy[option]}</Clickable>)}</div></div></DialogContent></Dialog>
+  </VideoShell>;
+}
+
 function VoiceWorkspace({
   accent,
   locale,
@@ -1538,6 +1796,20 @@ function RoomWorkspace({
   onToggleNoiseReduction,
   onSelectMicrophone,
   onToggleMicrophone,
+  cameraActive,
+  cameraDeviceId,
+  cameraPending,
+  onSelectCamera,
+  onToggleCamera,
+  onToggleScreenShare,
+  onUpdateVideoQuality,
+  screenShareActive,
+  screenAudioFallbackOpen,
+  onCloseScreenAudioFallback,
+  onShareScreenWithoutAudio,
+  screenShareVolume,
+  onScreenShareVolumeChange,
+  videoQuality,
   volume,
   onVolumeChange,
   peerTyping,
@@ -1547,6 +1819,7 @@ function RoomWorkspace({
   connectionRoute,
   onSendChatMessage,
   voiceActive,
+  videoActive,
 }: {
   chatMessages: ChatMessage[];
   fileTransfers: FileTransferSnapshot[];
@@ -1572,6 +1845,20 @@ function RoomWorkspace({
   onToggleNoiseReduction: () => void;
   onSelectMicrophone: (deviceId: string) => Promise<boolean>;
   onToggleMicrophone: () => void;
+  cameraActive: boolean;
+  cameraDeviceId: string | null;
+  cameraPending: boolean;
+  onSelectCamera: (deviceId: string) => Promise<boolean>;
+  onToggleCamera: () => void;
+  onToggleScreenShare: () => void;
+  onUpdateVideoQuality: (quality: VideoQuality) => void;
+  screenShareActive: boolean;
+  screenAudioFallbackOpen: boolean;
+  onCloseScreenAudioFallback: () => void;
+  onShareScreenWithoutAudio: () => void;
+  screenShareVolume: number;
+  onScreenShareVolumeChange: (value: number) => void;
+  videoQuality: VideoQuality;
   volume: number;
   onVolumeChange: (value: number) => void;
   peerTyping: boolean;
@@ -1581,6 +1868,7 @@ function RoomWorkspace({
   connectionRoute: ConnectionRoute;
   onSendChatMessage: (text: string) => boolean;
   voiceActive: boolean;
+  videoActive: boolean;
 }) {
   const copy = roomCopy[locale];
   const { theme } = useTheme();
@@ -1647,7 +1935,9 @@ function RoomWorkspace({
       label: workspace.apps[workspaceId][0],
       running: workspaceId === "files"
         ? activeWorkspace !== "files" && fileRunning
-        : workspaceId === "voice" && activeWorkspace !== "voice" && voiceActive,
+        : workspaceId === "voice"
+          ? activeWorkspace !== "voice" && voiceActive
+          : workspaceId === "video" && activeWorkspace !== "video" && videoActive,
       onClick: () => activateWorkspace(workspaceId),
     };
   });
@@ -1739,7 +2029,7 @@ function RoomWorkspace({
                 const isRunning = runningWorkspaces.includes(activeWorkspace);
 
                 return (
-                  <section className={activeWorkspace === "chat" || activeWorkspace === "files" || activeWorkspace === "voice" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
+                  <section className={activeWorkspace === "chat" || activeWorkspace === "files" || activeWorkspace === "video" || activeWorkspace === "voice" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
                     {activeWorkspace === "chat" ? (
                       <ChatWorkspace
                         accent={theme.accent}
@@ -1771,6 +2061,28 @@ function RoomWorkspace({
                         ready={progress.dataChannel.state === "active"}
                         volume={volume}
                         onVolumeChange={onVolumeChange}
+                      />
+                    ) : activeWorkspace === "video" ? (
+                      <VideoWorkspace
+                        accent={theme.accent}
+                        cameraActive={cameraActive}
+                        cameraDeviceId={cameraDeviceId}
+                        locale={locale}
+                        media={media}
+                        onScreenShareVolumeChange={onScreenShareVolumeChange}
+                        onSelectCamera={onSelectCamera}
+                        onSpeakerVolumeChange={onVolumeChange}
+                        onToggleCamera={onToggleCamera}
+                        onToggleScreenShare={onToggleScreenShare}
+                        onUpdateVideoQuality={onUpdateVideoQuality}
+                        quality={videoQuality}
+                        ready={progress.dataChannel.state === "active" && !cameraPending}
+                        screenShareActive={screenShareActive}
+                        screenAudioFallbackOpen={screenAudioFallbackOpen}
+                        onCloseScreenAudioFallback={onCloseScreenAudioFallback}
+                        onShareScreenWithoutAudio={onShareScreenWithoutAudio}
+                        screenShareVolume={screenShareVolume}
+                        speakerVolume={volume}
                       />
                     ) : activeWorkspace === "status" ? (
                       <div className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
@@ -1908,8 +2220,16 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const [microphonePending, setMicrophonePending] = useState(false);
   const [noiseReductionActive, setNoiseReductionActive] = useState(true);
   const [remoteVoiceActive, setRemoteVoiceActive] = useState(false);
+  const [remoteVideoActive, setRemoteVideoActive] = useState(false);
   const [remoteAudioVersion, setRemoteAudioVersion] = useState(0);
   const [speakerVolume, setSpeakerVolume] = useState(1);
+  const [cameraActive, setCameraActive] = useState(false);
+  const [cameraDeviceId, setCameraDeviceId] = useState<string | null>(null);
+  const [cameraPending, setCameraPending] = useState(false);
+  const [screenShareActive, setScreenShareActive] = useState(false);
+  const [screenShareVolume, setScreenShareVolume] = useState(1);
+  const [screenAudioFallbackOpen, setScreenAudioFallbackOpen] = useState(false);
+  const [videoQuality, setVideoQuality] = useState<VideoQuality>("balanced");
   const [peerTyping, setPeerTyping] = useState(false);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const fileTransfersRef = useRef<FileTransferSnapshot[]>([]);
@@ -1918,6 +2238,10 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const reconnectDialogTimerRef = useRef<number | null>(null);
   const rawMicrophoneTrackRef = useRef<MediaStreamTrack | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
+  const remoteScreenAudioRef = useRef<HTMLAudioElement>(null);
+  const cameraTrackRef = useRef<MediaStreamTrack | null>(null);
+  const screenVideoTrackRef = useRef<MediaStreamTrack | null>(null);
+  const screenAudioTrackRef = useRef<MediaStreamTrack | null>(null);
   const [progress, setProgress] = useState<ConnectionProgress>({
     websocket: { state: "pending", detail: "Waiting for signaling socket" },
     resource: { state: "pending", detail: "Waiting to request Cloudflare resources" },
@@ -1985,9 +2309,9 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   }, []);
 
   const resumeRemoteAudio = () => {
-    const audio = remoteAudioRef.current;
-    if (!audio) return;
-    void audio.play().catch(() => undefined);
+    for (const audio of [remoteAudioRef.current, remoteScreenAudioRef.current]) {
+      if (audio) void audio.play().catch(() => undefined);
+    }
   };
 
   useEffect(() => {
@@ -2000,6 +2324,17 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     if (audio.srcObject !== remoteStream) audio.srcObject = remoteStream ?? null;
     resumeRemoteAudio();
   }, [mediaTransport, remoteAudioVersion, speakerVolume]);
+
+  useEffect(() => {
+    const audio = remoteScreenAudioRef.current;
+    const remoteStream = mediaTransport?.getRemoteStream("screen-audio");
+    if (!audio) return;
+    audio.autoplay = true;
+    audio.muted = false;
+    audio.volume = screenShareVolume;
+    if (audio.srcObject !== remoteStream) audio.srcObject = remoteStream ?? null;
+    void audio.play().catch(() => undefined);
+  }, [mediaTransport, remoteAudioVersion, screenShareVolume]);
 
   useEffect(() => {
     const session = new NativeWebRTCSession(
@@ -2026,6 +2361,26 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       },
       () => {
         setError("Data channel failed.");
+        if (peerTypingTimerRef.current !== null) window.clearTimeout(peerTypingTimerRef.current);
+        peerTypingTimerRef.current = null;
+        setPeerTyping(false);
+        chatMessagesRef.current = [];
+        setChatMessages([]);
+        if (fileTransferRefreshTimerRef.current !== null) window.clearTimeout(fileTransferRefreshTimerRef.current);
+        fileTransferRefreshTimerRef.current = null;
+        fileTransfersRef.current = [];
+        setFileTransfers([]);
+        void fileManagerRef.current?.clearSession();
+        rawMicrophoneTrackRef.current = null;
+        cameraTrackRef.current = null;
+        screenVideoTrackRef.current = null;
+        screenAudioTrackRef.current = null;
+        setMicrophoneActive(false);
+        setMicrophoneDeviceId(null);
+        setCameraActive(false);
+        setCameraDeviceId(null);
+        setScreenShareActive(false);
+        setScreenAudioFallbackOpen(false);
         setConnectionRoute("direct");
         setDialogPhase("closing-for-reconnect");
         if (reconnectDialogTimerRef.current !== null) window.clearTimeout(reconnectDialogTimerRef.current);
@@ -2066,11 +2421,13 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     setMediaTransport(session.media);
     const unsubscribeMedia = session.media.subscribe((slots) => {
       const remoteAudio = slots.find((slot) => slot.id === "camera-audio");
+      const remoteVideo = slots.some((slot) => (slot.id === "camera-video" || slot.id === "screen-video") && slot.remoteState === "live");
       setRemoteAudioVersion((version) => version + 1);
       setRemoteVoiceActive((current) => {
         const next = remoteAudio?.remoteState === "live";
         return current === next ? current : next;
       });
+      setRemoteVideoActive((current) => current === remoteVideo ? current : remoteVideo);
     });
     session.attachFileTransferManager(fileManagerRef.current);
     session.connect();
@@ -2082,6 +2439,12 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       unsubscribeMedia();
       rawMicrophoneTrackRef.current?.stop();
       rawMicrophoneTrackRef.current = null;
+      cameraTrackRef.current?.stop();
+      cameraTrackRef.current = null;
+      screenVideoTrackRef.current?.stop();
+      screenVideoTrackRef.current = null;
+      screenAudioTrackRef.current?.stop();
+      screenAudioTrackRef.current = null;
       sessionRef.current = null;
       setMediaTransport(null);
       setMicrophoneActive(false);
@@ -2089,7 +2452,15 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       setMicrophonePending(false);
       setNoiseReductionActive(true);
       setRemoteVoiceActive(false);
+      setRemoteVideoActive(false);
       setSpeakerVolume(1);
+      setCameraActive(false);
+      setCameraDeviceId(null);
+      setCameraPending(false);
+      setScreenShareActive(false);
+      setScreenShareVolume(1);
+      setScreenAudioFallbackOpen(false);
+      setVideoQuality("balanced");
     };
   }, [roomId]);
 
@@ -2273,6 +2644,162 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     }
   };
 
+  const videoConstraints = (quality: VideoQuality): MediaTrackConstraints => {
+    if (quality === "low") return { frameRate: { ideal: 24, max: 30 }, height: { ideal: 540, max: 720 }, width: { ideal: 960, max: 1280 } };
+    if (quality === "high") return { frameRate: { ideal: 30, max: 60 }, height: { ideal: 1080, max: 1440 }, width: { ideal: 1920, max: 2560 } };
+    return { frameRate: { ideal: 30, max: 30 }, height: { ideal: 720, max: 1080 }, width: { ideal: 1280, max: 1920 } };
+  };
+
+  const updateVideoQuality = async (quality: VideoQuality) => {
+    setVideoQuality(quality);
+    const track = cameraTrackRef.current;
+    if (!track) return;
+    try {
+      await track.applyConstraints(videoConstraints(quality));
+    } catch {
+      // Devices can reject an ideal resolution; WebRTC continues with its current encoder configuration.
+    }
+  };
+
+  const toggleCamera = async () => {
+    const media = sessionRef.current?.media;
+    if (!media || cameraPending) return;
+    setCameraPending(true);
+    try {
+      const existing = media.getLocalTrack("camera-video");
+      if (existing) {
+        const detached = await media.replaceLocalTrack("camera-video", null, "ended");
+        if (!detached) return;
+        existing.stop();
+        cameraTrackRef.current = null;
+        setCameraActive(false);
+        setCameraDeviceId(null);
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoConstraints(videoQuality) });
+      const track = stream.getVideoTracks()[0];
+      if (!track || !await media.replaceLocalTrack("camera-video", track, "live")) {
+        track?.stop();
+        return;
+      }
+      cameraTrackRef.current = track;
+      track.addEventListener("ended", () => {
+        cameraTrackRef.current = null;
+        setCameraActive(false);
+        setCameraDeviceId(null);
+        void media.replaceLocalTrack("camera-video", null, "ended");
+      }, { once: true });
+      setCameraActive(true);
+      setCameraDeviceId(track.getSettings().deviceId ?? null);
+    } finally {
+      setCameraPending(false);
+    }
+  };
+
+  const selectCamera = async (deviceId: string): Promise<boolean> => {
+    const media = sessionRef.current?.media;
+    if (!media || cameraPending) return false;
+    setCameraPending(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...videoConstraints(videoQuality), deviceId: { exact: deviceId } } });
+      const track = stream.getVideoTracks()[0];
+      if (!track || !await media.replaceLocalTrack("camera-video", track, "live")) {
+        track?.stop();
+        return false;
+      }
+      const previous = cameraTrackRef.current;
+      cameraTrackRef.current = track;
+      previous?.stop();
+      track.addEventListener("ended", () => {
+        if (cameraTrackRef.current !== track) return;
+        cameraTrackRef.current = null;
+        setCameraActive(false);
+        setCameraDeviceId(null);
+        void media.replaceLocalTrack("camera-video", null, "ended");
+      }, { once: true });
+      setCameraActive(true);
+      setCameraDeviceId(track.getSettings().deviceId ?? deviceId);
+      return true;
+    } finally {
+      setCameraPending(false);
+    }
+  };
+
+  const startScreenShare = async (withAudio: boolean) => {
+    const media = sessionRef.current?.media;
+    if (!media || cameraPending) return;
+    setCameraPending(true);
+    try {
+      let stream: MediaStream;
+      try {
+        // Do not apply microphone constraints or Chromium-only hints here.
+        // System-audio capture is chosen by the picker and must be requested
+        // through the portable display-capture shape.
+        stream = await navigator.mediaDevices.getDisplayMedia({ audio: withAudio, video: true });
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : "";
+        const audioSourceFailed = /audio source|audio capture|system audio/i.test(message);
+        if (withAudio && audioSourceFailed) {
+          setScreenAudioFallbackOpen(true);
+          return;
+        }
+        throw cause;
+      }
+      const video = stream.getVideoTracks()[0];
+      const audio = stream.getAudioTracks()[0] ?? null;
+      if (!video || !await media.replaceLocalTrack("screen-video", video, "live")) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      if (audio && !await media.replaceLocalTrack("screen-audio", audio, "live")) {
+        audio.stop();
+      }
+      screenVideoTrackRef.current = video;
+      screenAudioTrackRef.current = audio?.readyState === "live" ? audio : null;
+      video.addEventListener("ended", () => {
+        if (screenVideoTrackRef.current !== video) return;
+        screenVideoTrackRef.current = null;
+        screenAudioTrackRef.current?.stop();
+        screenAudioTrackRef.current = null;
+        setScreenShareActive(false);
+        void media.replaceLocalTrack("screen-video", null, "ended");
+        void media.replaceLocalTrack("screen-audio", null, "ended");
+      }, { once: true });
+      setScreenShareActive(true);
+    } finally {
+      setCameraPending(false);
+    }
+  };
+
+  const toggleScreenShare = async () => {
+    const media = sessionRef.current?.media;
+    if (!media || cameraPending) return;
+    if (!media.getLocalTrack("screen-video")) {
+      await startScreenShare(true);
+      return;
+    }
+    setCameraPending(true);
+    try {
+      const [videoRemoved, audioRemoved] = await Promise.all([
+        media.replaceLocalTrack("screen-video", null, "ended"),
+        media.replaceLocalTrack("screen-audio", null, "ended"),
+      ]);
+      if (!videoRemoved || !audioRemoved) return;
+      screenVideoTrackRef.current?.stop();
+      screenAudioTrackRef.current?.stop();
+      screenVideoTrackRef.current = null;
+      screenAudioTrackRef.current = null;
+      setScreenShareActive(false);
+    } finally {
+      setCameraPending(false);
+    }
+  };
+
+  const shareScreenWithoutAudio = () => {
+    setScreenAudioFallbackOpen(false);
+    void startScreenShare(false);
+  };
+
   useEffect(() => {
     const timer = window.setInterval(() => {
       const timeoutAt = Date.now() - 12_000;
@@ -2288,6 +2815,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     <Layout title={dialogPhase === "ready" ? roomCopy[locale].roomTitle(roomId) : roomCopy[locale].pageTitle(roomId)}>
       <div className="contents" onClickCapture={resumeRemoteAudio}>
       <audio className="sr-only" autoPlay playsInline ref={remoteAudioRef} />
+      <audio className="sr-only" autoPlay playsInline ref={remoteScreenAudioRef} />
       {dialogPhase === "full" ? (
         <RoomFullContent locale={locale} onLeave={leave} roomId={roomId} />
       ) : dialogPhase === "ready" || dialogPhase === "closing-for-reconnect" ? (
@@ -2318,12 +2846,27 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
           onToggleMicrophone={toggleMicrophone}
           volume={speakerVolume}
           onVolumeChange={setSpeakerVolume}
+          cameraActive={cameraActive}
+          cameraDeviceId={cameraDeviceId}
+          cameraPending={cameraPending}
+          onSelectCamera={selectCamera}
+          onToggleCamera={toggleCamera}
+          onToggleScreenShare={toggleScreenShare}
+          onUpdateVideoQuality={updateVideoQuality}
+          screenShareActive={screenShareActive}
+          screenAudioFallbackOpen={screenAudioFallbackOpen}
+          onCloseScreenAudioFallback={() => setScreenAudioFallbackOpen(false)}
+          onShareScreenWithoutAudio={shareScreenWithoutAudio}
+          screenShareVolume={screenShareVolume}
+          onScreenShareVolumeChange={setScreenShareVolume}
+          videoQuality={videoQuality}
           open={dialogPhase === "ready"}
           peerTyping={peerTyping}
           progress={progress}
           roomId={roomId}
           connectionRoute={connectionRoute}
           voiceActive={microphoneActive || remoteVoiceActive}
+          videoActive={cameraActive || screenShareActive || remoteVideoActive}
         />
       ) : (
         <ConnectionDialog

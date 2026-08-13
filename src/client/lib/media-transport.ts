@@ -119,7 +119,11 @@ export class MediaTransport {
   }
 
   getRemoteStream(id: MediaSlotId): MediaStream | undefined {
-    return this.slots.get(id)!.remoteStream;
+    const slot = this.slots.get(id)!;
+    // Fixed RTP slots create receiver tracks during initial negotiation even
+    // when the peer has not attached a real source yet. Expose a stream only
+    // after the peer explicitly announces that slot as live.
+    return slot.remoteState === "live" ? slot.remoteStream : undefined;
   }
 
   getSnapshot(id: MediaSlotId): MediaSlotSnapshot {
@@ -230,12 +234,18 @@ export class MediaTransport {
   }
 
   dispose(): void {
+    this.stopLocalTracks();
+    this.detachPeer();
+  }
+
+  /** Stops all local capture sources without retaining them for reconnection. */
+  stopLocalTracks(): void {
     for (const slot of this.slots.values()) {
       slot.localTrack?.stop();
       slot.localTrack = null;
       slot.localState = "ended";
     }
-    this.detachPeer();
+    this.emit();
   }
 
   private bindSlot(slot: MediaSlotRuntime, transceiver: RTCRtpTransceiver): void {
@@ -250,7 +260,8 @@ export class MediaTransport {
     const slot = [...this.slots.values()].find((candidate) => candidate.transceiver === event.transceiver);
     if (!slot) return false;
     slot.remoteStream = event.streams[0] ?? new MediaStream([event.track]);
-    slot.remoteState = "live";
+    // Do not promote a pre-negotiated receiver track to live here. The remote
+    // sender can be empty; the control message is the source of truth.
     event.track.addEventListener("ended", () => {
       if (slot.remoteStream?.getTracks().includes(event.track)) {
         slot.remoteState = "ended";

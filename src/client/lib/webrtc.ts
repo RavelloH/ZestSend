@@ -727,6 +727,7 @@ export class NativeWebRTCSession {
       this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
       this.setStep("dataChannel", { channels: 0, state: "pending", detail: "Waiting for data channel", transferred: this.dataTransfer() });
       this.closeDataChannels();
+      this.mediaTransport.stopLocalTracks();
       this.mediaTransport.detachPeer();
       this.peer?.close();
       this.peer = null;
@@ -844,6 +845,7 @@ export class NativeWebRTCSession {
     this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
     this.setStep("dataChannel", { channels: 0, state: "pending", detail: "Waiting for data channel", transferred: this.dataTransfer() });
     this.closeDataChannels();
+    this.mediaTransport.stopLocalTracks();
     this.mediaTransport.detachPeer();
     const peer = this.peer;
     this.peer = null;

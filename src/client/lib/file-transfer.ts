@@ -232,6 +232,18 @@ export class FileTransferManager {
     this.receiverClosed.clear();
   }
 
+  /** Clears in-memory transfers and their temporary receiving files after a room reconnect. */
+  async clearSession(): Promise<void> {
+    const records = [...this.files.values()];
+    for (const record of records) {
+      if (record.url) URL.revokeObjectURL(record.url);
+      await this.removeTemporaryFile(record);
+    }
+    this.files.clear();
+    this.receiverReady.clear();
+    this.receiverClosed.clear();
+  }
+
   setConnectionRoute(route: "direct" | "relay"): void {
     if (this.connectionRoute === route) return;
     this.connectionRoute = route;
