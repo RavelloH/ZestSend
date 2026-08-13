@@ -6,18 +6,35 @@ import {
   RiCheckLine,
   RiChat3Line,
   RiCloseCircleFill,
+  RiDeleteBinLine,
+  RiDownload2Line,
+  RiEyeLine,
   RiErrorWarningLine,
   RiExchange2Line,
   RiFileEditLine,
+  RiFileCodeLine,
+  RiFileExcel2Line,
+  RiFileImageLine,
+  RiFileLine,
+  RiFileMusicLine,
+  RiFilePdf2Line,
+  RiFilePpt2Line,
+  RiFileTextLine,
+  RiFileWord2Line,
+  RiFileZipLine,
   RiFolderTransferLine,
   RiGlobalLine,
   RiMicLine,
   RiPlayCircleLine,
   RiPulseLine,
   RiRadioButtonLine,
+  RiPauseLine,
+  RiPlayLine,
+  RiRefreshLine,
   RiShareForwardLine,
   RiRouterLine,
   RiSendPlane2Fill,
+  RiStopLine,
   RiLogoutBoxRLine,
   RiLock2Fill,
   RiLoader4Line,
@@ -25,11 +42,11 @@ import {
   RiVideoOnLine,
   RiWifiLine,
 } from "@remixicon/react";
-import NumberFlow, { continuous, NumberFlowGroup } from "@number-flow/react";
+import NumberFlow, { NumberFlowGroup } from "@number-flow/react";
 import { useNavigate } from "@tanstack/react-router";
 import cuid from "cuid";
 import { AnimatePresence, motion } from "framer-motion";
-import { type DragEventHandler, type ReactNode, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type DragEventHandler, type ReactNode, useEffect, useRef, useState } from "react";
 
 import Layout from "../components/Layout";
 import { useTheme } from "../components/theme";
@@ -37,6 +54,7 @@ import { AutoTransition } from "../components/ui/auto-transition";
 import { Dialog, DialogContent } from "../components/ui/dialog";
 import { MagneticDock, type DockItemData } from "../components/ui/magnetic-dock";
 import { OverlayScrollbar } from "../components/ui/overlay-scrollbar";
+import { FileTransferManager, type FileTransferSnapshot } from "../lib/file-transfer";
 import {
   NativeWebRTCSession,
   type ConnectionRoute,
@@ -67,6 +85,7 @@ const workspaceComposerClassName = "relative h-28 shrink-0";
 function WorkspaceShell({
   children,
   footer,
+  status,
   onDragEnter,
   onDragLeave,
   onDragOver,
@@ -76,6 +95,7 @@ function WorkspaceShell({
 }: {
   children: ReactNode;
   footer: ReactNode;
+  status?: ReactNode;
   onDragEnter?: DragEventHandler<HTMLElement>;
   onDragLeave?: DragEventHandler<HTMLElement>;
   onDragOver?: DragEventHandler<HTMLElement>;
@@ -98,6 +118,7 @@ function WorkspaceShell({
         event.preventDefault();
         onSubmit?.();
       }}>
+        {status}
         <div className={workspaceComposerClassName}>{footer}</div>
       </form>
     </section>
@@ -108,7 +129,10 @@ function appendChatMessage(messages: ChatMessage[], message: ChatMessage): ChatM
   return [...messages, message].sort((left, right) => left.id.localeCompare(right.id));
 }
 
-const continuousNumberFlow = [continuous];
+function displayedNumber(value: number, precision = 0): number {
+  const factor = 10 ** precision;
+  return Math.round(value * factor) / factor;
+}
 const ignoreDialogOpenChange = () => undefined;
 
 type RoomLocale = "en" | "zh";
@@ -283,6 +307,7 @@ function latencyColor(latency: number, realtimeConnection = false): string {
 }
 
 function LatencyValue({ latency, realtimeConnection = false }: { latency: number; realtimeConnection?: boolean }) {
+  const value = Math.round(latency);
   return (
     <NumberFlowGroup>
       <motion.span
@@ -292,8 +317,7 @@ function LatencyValue({ latency, realtimeConnection = false }: { latency: number
       >
         <NumberFlow
           className="inline-flex leading-none"
-          plugins={continuousNumberFlow}
-          value={latency}
+          value={value}
           willChange
         />
         <motion.span layout="position" className="ml-1" transition={{ layout: { duration: 0.42, ease: "easeOut" } }}>ms</motion.span>
@@ -512,6 +536,7 @@ function transferredValue(bytes: number): { precision: number; unit: "B" | "KB" 
 
 function TransferAmount({ bytes }: { bytes: number }) {
   const { precision, unit, value } = transferredValue(bytes);
+  const displayedValue = displayedNumber(value, precision);
   return (
     <motion.span
       layout="position"
@@ -521,8 +546,7 @@ function TransferAmount({ bytes }: { bytes: number }) {
       <NumberFlow
         className="inline-flex leading-none"
         format={{ maximumFractionDigits: precision, minimumFractionDigits: precision }}
-        plugins={continuousNumberFlow}
-        value={value}
+        value={displayedValue}
         willChange
       />
       <motion.span layout="position" className="ml-1" transition={{ layout: { duration: 0.42, ease: "easeOut" } }}>{unit}</motion.span>
@@ -657,19 +681,9 @@ function ChatWorkspace({
     <WorkspaceShell
       footer={(
         <>
-          <AutoTransition
-            as="span"
-            aria-live="polite"
-            className="absolute -top-5 left-4 text-xs font-medium tracking-[0.04em] text-sky-100/45"
-            duration={0.2}
-            transitionKey={peerTyping ? "typing" : "idle"}
-            type="fade"
-          >
-            {peerTyping ? typingLabel : null}
-          </AutoTransition>
           <textarea
             aria-label={placeholder}
-            className="h-28 w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 pr-14 text-sm font-medium leading-relaxed tracking-[0.03em] text-sky-50 outline-none transition-colors placeholder:text-sky-100/35 focus:border-sky-100/35 focus:bg-black/30 disabled:cursor-not-allowed disabled:opacity-45"
+            className="absolute bottom-0 left-0 h-28 w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 pr-14 text-sm font-medium leading-relaxed tracking-[0.03em] text-sky-50 outline-none transition-colors placeholder:text-sky-100/35 focus:border-sky-100/35 focus:bg-black/30 disabled:cursor-not-allowed disabled:opacity-45"
             disabled={!ready}
             maxLength={4_000}
             onChange={(event) => {
@@ -696,6 +710,18 @@ function ChatWorkspace({
             <RiSendPlane2Fill aria-hidden="true" className="size-4" />
           </button>
         </>
+      )}
+      status={(
+        <AutoTransition
+          as="span"
+          aria-live="polite"
+          className="pointer-events-none absolute bottom-full left-4 mb-3 text-xs font-medium leading-4 tracking-[0.04em] text-sky-100/45"
+          duration={0.2}
+          transitionKey={peerTyping ? "typing" : "idle"}
+          type="fade"
+        >
+          {peerTyping ? typingLabel : null}
+        </AutoTransition>
       )}
       onSubmit={send}
       scrollKey={messages.length}
@@ -787,11 +813,84 @@ function ChatDeliveryStatus({ status }: { status: NonNullable<ChatMessage["deliv
   );
 }
 
-function FileWorkspace({ locale, ready }: { locale: RoomLocale; ready: boolean }) {
+function fileIcon(name: string) {
+  const extension = name.split(".").pop()?.toLowerCase() ?? "";
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "heic"].includes(extension)) return RiFileImageLine;
+  if (["mp3", "wav", "ogg", "m4a", "flac", "aac"].includes(extension)) return RiFileMusicLine;
+  if (["zip", "rar", "7z", "tar", "gz", "bz2", "xz"].includes(extension)) return RiFileZipLine;
+  if (extension === "pdf") return RiFilePdf2Line;
+  if (["doc", "docx", "odt", "rtf"].includes(extension)) return RiFileWord2Line;
+  if (["xls", "xlsx", "csv", "ods"].includes(extension)) return RiFileExcel2Line;
+  if (["ppt", "pptx", "odp"].includes(extension)) return RiFilePpt2Line;
+  if (["txt", "md", "mdx", "log", "json", "yaml", "yml", "xml"].includes(extension)) return RiFileTextLine;
+  if (["js", "ts", "tsx", "jsx", "css", "html", "py", "rs", "go", "java", "c", "cpp", "h", "sh", "sql"].includes(extension)) return RiFileCodeLine;
+  return RiFileLine;
+}
+
+function FileSizeValue({ bytes, suffix = "" }: { bytes: number; suffix?: string }) {
+  const unit = bytes < 1_024 ? "B" : bytes < 1_024 * 1_024 ? "KB" : bytes < 1_024 * 1_024 * 1_024 ? "MB" : "GB";
+  const divisor = unit === "B" ? 1 : unit === "KB" ? 1_024 : unit === "MB" ? 1_024 * 1_024 : 1_024 * 1_024 * 1_024;
+  const precision = unit === "MB" && bytes < 10 * 1_024 * 1_024 || unit === "GB" ? 1 : 0;
+  const displayedValue = displayedNumber(bytes / divisor, precision);
+  return (
+    <motion.span layout="position" className="inline-flex items-baseline" transition={{ layout: { duration: 0.42, ease: "easeOut" } }}>
+      <NumberFlow format={{ maximumFractionDigits: precision, minimumFractionDigits: precision }} value={displayedValue} willChange />
+      <motion.span layout="position" className="ml-1" transition={{ layout: { duration: 0.42, ease: "easeOut" } }}>{unit}{suffix}</motion.span>
+    </motion.span>
+  );
+}
+
+function EtaValue({ seconds }: { seconds: number | null }) {
+  if (seconds === null) return <motion.span layout="position">--</motion.span>;
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor(seconds % 3_600 / 60);
+  const remainingSeconds = seconds % 60;
+  return <motion.span layout="position" className="inline-flex items-baseline">
+    {hours > 0 ? <><NumberFlow value={hours} willChange /><motion.span layout="position" className="ml-0.5">h</motion.span><motion.span layout="position" className="mx-1" /></> : null}
+    {hours > 0 || minutes > 0 ? <><NumberFlow value={minutes} willChange /><motion.span layout="position" className="ml-0.5">m</motion.span><motion.span layout="position" className="mx-1" /></> : null}
+    <NumberFlow value={remainingSeconds} willChange /><motion.span layout="position" className="ml-0.5">s</motion.span>
+  </motion.span>;
+}
+
+function FileWorkspace({ accent, files, locale, onAccept, onCancel, onDelete, onDownload, onOffer, onPause, onResend, ready }: {
+  accent: string;
+  files: FileTransferSnapshot[];
+  locale: RoomLocale;
+  onAccept: (id: string) => void;
+  onCancel: (id: string) => void;
+  onDelete: (id: string) => void;
+  onDownload: (id: string) => void;
+  onPause: (id: string) => void;
+  onOffer: (files: FileList | File[]) => void;
+  onResend: (id: string) => void;
+  ready: boolean;
+}) {
   const [isDragging, setIsDragging] = useState(false);
+  const dragDepthRef = useRef(0);
+  const [previewFile, setPreviewFile] = useState<FileTransferSnapshot | null>(null);
+  const pickerRef = useRef<HTMLInputElement>(null);
   const copy = locale === "zh"
-    ? { choose: "拖入、粘贴或选择文件", empty: "选择文件以发送" }
-    : { choose: "Drop, paste, or choose files", empty: "Choose files to send" };
+    ? { accept: "接收", reject: "拒绝", cancel: "取消", choose: "拖入、粘贴或选择文件", empty: "选择文件以发送", offered: "对方向你发送了一个文件", queued: "等待上一份文件完成", sending: "正在发送", waiting: "等待对方确认", receiving: "正在接收", paused: "已暂停", complete: "传输完成", cancelled: "已取消", error: "传输失败", preview: "预览", view: "查看", pause: "暂停", resume: "继续", stop: "停止", save: "保存", remove: "删除", resend: "再次发送", previewUnsupported: "不支持预览此文件类型" }
+    : { accept: "Receive", reject: "Reject", cancel: "Cancel", choose: "Drop, paste, or choose files", empty: "Choose files to send", offered: "The other participant wants to send you a file", queued: "Waiting for the previous file", sending: "Sending", waiting: "Waiting for acceptance", receiving: "Receiving", paused: "Paused", complete: "Transfer complete", cancelled: "Cancelled", error: "Transfer failed", preview: "Preview", view: "View", pause: "Pause", resume: "Resume", stop: "Stop", save: "Save", remove: "Delete", resend: "Send again", previewUnsupported: "This file type cannot be previewed" };
+
+  const stateLabel = (file: FileTransferSnapshot) => file.state === "queued" ? copy.queued : file.state === "offered"
+    ? file.direction === "incoming" ? copy.offered : copy.waiting
+    : file.state === "waiting" ? copy.waiting
+    : file.state === "transferring" ? file.paused ? copy.paused : file.direction === "incoming" ? copy.receiving : copy.sending
+    : file.state === "complete" ? copy.complete
+    : file.state === "cancelled" ? copy.cancelled
+    : file.error || copy.error;
+
+  useEffect(() => {
+      const onPaste = (event: ClipboardEvent) => {
+        const files = Array.from(event.clipboardData?.files ?? []);
+        if (!files.length || !ready) return;
+        event.preventDefault();
+        onOffer(files);
+      };
+      window.addEventListener("paste", onPaste);
+      return () => window.removeEventListener("paste", onPaste);
+    }, [onOffer, ready]);
 
   return (
     <WorkspaceShell
@@ -799,6 +898,7 @@ function FileWorkspace({ locale, ready }: { locale: RoomLocale; ready: boolean }
         <button
           className={`inline-flex h-full w-full shrink-0 flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-4 py-3 text-sm font-semibold tracking-[0.04em] transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${isDragging ? "border-sky-100/70 bg-white/[0.07] text-sky-50" : "border-sky-100/20 bg-black/15 text-sky-100/70 hover:bg-black/25 hover:text-sky-50"}`}
           disabled={!ready}
+          onClick={() => pickerRef.current?.click()}
           type="button"
         >
           <RiAddLine aria-hidden="true" className="size-5" />
@@ -806,37 +906,75 @@ function FileWorkspace({ locale, ready }: { locale: RoomLocale; ready: boolean }
         </button>
       )}
       onDragEnter={(event) => {
-        if (!event.dataTransfer.types.includes("Files")) return;
+        if (!ready || !event.dataTransfer.types.includes("Files")) return;
         event.preventDefault();
+        dragDepthRef.current += 1;
         setIsDragging(true);
       }}
-      onDragLeave={() => setIsDragging(false)}
+      onDragLeave={(event) => {
+        if (!event.dataTransfer.types.includes("Files")) return;
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) setIsDragging(false);
+      }}
       onDragOver={(event) => {
         if (event.dataTransfer.types.includes("Files")) event.preventDefault();
       }}
       onDrop={(event) => {
         event.preventDefault();
+        dragDepthRef.current = 0;
         setIsDragging(false);
+        if (ready && event.dataTransfer.files.length) onOffer(event.dataTransfer.files);
       }}
-      scrollKey="file-workspace"
+      scrollKey={files.map((file) => `${file.id}-${file.state}-${file.transferredBytes}`).join("|")}
     >
-      <div className="flex min-h-full flex-col justify-end pt-8">
-        <div className="flex flex-1 flex-col items-center justify-center px-6 pb-8 text-center">
-          <RiFolderTransferLine aria-hidden="true" className="size-10 text-sky-200/55" />
-          <p className="mt-4 max-w-sm text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/50">{copy.empty}</p>
-        </div>
-      </div>
+      <input className="sr-only" multiple onChange={(event) => { if (event.target.files?.length) onOffer(event.target.files); event.target.value = ""; }} ref={pickerRef} type="file" />
+      {files.length === 0 ? <div className="flex min-h-full flex-col items-center justify-center px-6 pb-8 text-center"><RiFolderTransferLine aria-hidden="true" className="size-10 text-sky-200/55" /><p className="mt-4 max-w-sm text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/50">{copy.empty}</p></div> : <div className="space-y-3 pt-4"><AnimatePresence initial={false}>{files.map((file) => {
+        const progress = file.size ? Math.min(100, file.transferredBytes / file.size * 100) : file.state === "complete" ? 100 : 0;
+        const confirmed = file.size ? Math.min(100, file.confirmedBytes / file.size * 100) : file.state === "complete" ? 100 : 0;
+        const Icon = fileIcon(file.name);
+        const eta = file.state === "complete" && file.duration !== null ? Math.max(0, Math.round(file.duration / 1000)) : file.eta;
+        const displaySpeed = file.state === "complete" ? file.averageSpeed : file.speed;
+        const isIncoming = file.direction === "incoming";
+        const active = file.state === "transferring";
+        const actionClass = "inline-flex min-w-0 items-center justify-center gap-1.5 rounded-xl border border-white/10 px-2 py-2 text-xs font-semibold tracking-[0.02em] transition-colors disabled:cursor-not-allowed disabled:opacity-35";
+        const preview = () => setPreviewFile(file);
+        const action = (label: string, IconComponent: typeof RiEyeLine, onClick: () => void, style?: CSSProperties, disabled = false, transitionKey = label) => <button className={actionClass} disabled={disabled} onClick={onClick} style={style} type="button"><AutoTransition as="span" className="inline-flex min-w-0 items-center justify-center gap-1.5" duration={0.18} presenceMode="wait" transitionKey={transitionKey} type="fade"><IconComponent aria-hidden="true" className="size-4 shrink-0" /><span className="truncate">{label}</span></AutoTransition></button>;
+        let actions: ReactNode[];
+        if (isIncoming && file.state === "offered") actions = [action(copy.preview, RiEyeLine, preview, { backgroundColor: `${accent}40` }), action(copy.accept, RiDownload2Line, () => onAccept(file.id), { backgroundColor: "rgba(16, 185, 129, 0.28)" }), action(copy.reject, RiDeleteBinLine, () => onCancel(file.id), { backgroundColor: "rgba(244, 63, 94, 0.28)" })];
+        else if (isIncoming && active) actions = [action(copy.preview, RiEyeLine, preview, undefined, true), action(file.paused ? copy.resume : copy.pause, file.paused ? RiPlayLine : RiPauseLine, () => onPause(file.id), { backgroundColor: "rgba(16, 185, 129, 0.28)" }), action(copy.stop, RiStopLine, () => onCancel(file.id), { backgroundColor: "rgba(244, 63, 94, 0.28)" })];
+        else if (isIncoming && file.state === "complete") actions = [action(copy.view, RiEyeLine, preview, { backgroundColor: `${accent}40` }), action(copy.save, RiDownload2Line, () => onDownload(file.id), { backgroundColor: "rgba(16, 185, 129, 0.28)" }), action(copy.remove, RiDeleteBinLine, () => onDelete(file.id), { backgroundColor: "rgba(244, 63, 94, 0.28)" })];
+        else if (!isIncoming && file.state === "complete") actions = [action(copy.view, RiEyeLine, preview, { backgroundColor: `${accent}40` }), action(copy.resend, RiRefreshLine, () => onResend(file.id), { backgroundColor: "rgba(16, 185, 129, 0.28)" }), action(copy.cancel, RiDeleteBinLine, () => onDelete(file.id), { backgroundColor: "rgba(244, 63, 94, 0.28)" })];
+        else actions = [action(copy.view, RiEyeLine, preview), action(file.state === "queued" ? copy.queued : active && !file.paused ? copy.pause : copy.resume, file.paused ? RiPlayLine : RiPauseLine, () => onPause(file.id), { backgroundColor: "rgba(16, 185, 129, 0.28)" }, !active), action(copy.cancel, RiCloseCircleFill, () => onCancel(file.id), { backgroundColor: "rgba(244, 63, 94, 0.28)" })];
+        return <motion.article animate={{ opacity: 1, y: 0 }} className="overflow-hidden border-b border-white/10 pb-4" exit={{ height: 0, opacity: 0, y: -10, paddingBottom: 0 }} initial={{ opacity: 0, y: 10 }} key={file.id} layout transition={{ layout: { duration: 0.3, ease: "easeOut" }, opacity: { duration: 0.18 }, height: { duration: 0.26, ease: "easeInOut" }, y: { duration: 0.22, ease: "easeOut" } }}><div className="flex min-w-0 items-stretch gap-3"><button aria-label={file.name} className="grid aspect-square w-16 shrink-0 place-items-center text-sky-200/65" type="button"><Icon aria-hidden="true" className="size-11" /></button><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold tracking-[0.04em] text-sky-50">{file.name}</p><div className="mt-3 space-y-1.5"><div className="h-1.5 overflow-hidden rounded-full bg-white/10"><motion.div animate={{ width: `${progress}%` }} className="h-full rounded-full" initial={{ width: "0%" }} style={{ backgroundColor: accent }} transition={{ type: "spring", stiffness: 220, damping: 28 }} /></div><div className="h-1.5 overflow-hidden rounded-full bg-white/[0.07]"><motion.div animate={{ width: `${confirmed}%` }} className="h-full rounded-full bg-sky-100/45" initial={{ width: "0%" }} transition={{ type: "spring", stiffness: 220, damping: 28 }} /></div></div><NumberFlowGroup><motion.div layout="position" className="mt-2 flex flex-wrap items-baseline gap-y-1 text-xs font-medium text-sky-100/45" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><NumberFlow value={Math.round(progress)} willChange /><motion.span layout="position">%</motion.span></motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><FileSizeValue bytes={file.transferredBytes} /><motion.span layout="position" className="mx-1">/</motion.span><FileSizeValue bytes={file.size} /></motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums">{displaySpeed > 0 ? <FileSizeValue bytes={displaySpeed} suffix="/s" /> : <motion.span layout="position">-- /s</motion.span>}</motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><EtaValue seconds={eta} /></motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex"><AutoTransition as="span" className="inline-flex tracking-[0.03em]" duration={0.18} presenceMode="wait" transitionKey={`${file.state}-${file.paused}-${file.error ?? ""}`} type="fade">{stateLabel(file)}</AutoTransition></motion.span></motion.div></NumberFlowGroup><div className="mt-3 grid grid-cols-3 gap-2">{actions}</div></div></div></motion.article>;
+      })}</AnimatePresence></div>}
+      <Dialog open={previewFile !== null} onOpenChange={(open) => { if (!open) setPreviewFile(null); }}>
+        <DialogContent aria-labelledby="file-preview-title" className="!max-w-md">
+          <div className="p-6 sm:p-8">
+            <p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{locale === "zh" ? "文件预览" : "FILE PREVIEW"}</p>
+            <h2 className="mt-3 truncate text-xl font-bold tracking-[0.04em] text-sky-50 sm:text-2xl" id="file-preview-title">{previewFile?.name}</h2>
+            <p className="mt-5 text-sm font-medium tracking-[0.04em] text-sky-100/60">{copy.previewUnsupported}</p>
+          </div>
+        </DialogContent>
+      </Dialog>
     </WorkspaceShell>
   );
 }
 
 function RoomWorkspace({
   chatMessages,
+  fileTransfers,
   locale,
   onExitComplete,
   onLeave,
   onMarkChatMessageRead,
   onChatTyping,
+  onAcceptFile,
+  onCancelFile,
+  onDeleteFile,
+  onDownloadFile,
+  onOfferFiles,
+  onPauseFile,
+  onResendFile,
   peerTyping,
   open,
   progress,
@@ -845,11 +983,19 @@ function RoomWorkspace({
   onSendChatMessage,
 }: {
   chatMessages: ChatMessage[];
+  fileTransfers: FileTransferSnapshot[];
   locale: RoomLocale;
   onExitComplete?: () => void;
   onLeave: () => void;
   onMarkChatMessageRead: (id: string) => boolean;
   onChatTyping: () => void;
+  onAcceptFile: (id: string) => void;
+  onCancelFile: (id: string) => void;
+  onDeleteFile: (id: string) => void;
+  onDownloadFile: (id: string) => void;
+  onOfferFiles: (files: FileList | File[]) => void;
+  onPauseFile: (id: string) => void;
+  onResendFile: (id: string) => void;
   peerTyping: boolean;
   open: boolean;
   progress: ConnectionProgress;
@@ -908,14 +1054,18 @@ function RoomWorkspace({
     setRunningWorkspaces((current) => current.includes(workspaceId) ? current : [...current, workspaceId]);
   };
 
+  const fileRunning = fileTransfers.some((file) => file.state === "transferring");
+  const pendingFileRequests = fileTransfers.filter((file) => file.direction === "incoming" && file.state === "offered").length;
+
   const dockItems: DockItemData[] = workspaceOrder.map((workspaceId) => {
     const Icon = workspaceIcons[workspaceId];
     return {
-      badge: workspaceId === "chat" ? unreadChatCount : undefined,
+      badge: workspaceId === "chat" ? unreadChatCount : workspaceId === "files" ? pendingFileRequests : undefined,
       icon: <Icon aria-hidden="true" className="size-full" />,
       id: workspaceId,
       isActive: activeWorkspace === workspaceId,
       label: workspace.apps[workspaceId][0],
+      running: workspaceId === "files" && activeWorkspace !== "files" && fileRunning,
       onClick: () => activateWorkspace(workspaceId),
     };
   });
@@ -934,6 +1084,7 @@ function RoomWorkspace({
         fadeOnly
         fullScreen
         aria-labelledby="connection-ready-title"
+        className="backdrop-blur-[10px]"
         style={{ height: "100dvh", maxHeight: "none", width: "100dvw" }}
       >
         <motion.div
@@ -943,12 +1094,24 @@ function RoomWorkspace({
         >
           <header className="flex items-center justify-between gap-4">
             <div className="flex min-w-0 items-baseline gap-2.5">
-              <p
-                className="animate-gradient bg-clip-text text-lg font-bold tracking-[0.06em] text-transparent sm:text-xl"
-                style={{ backgroundImage: `linear-gradient(120deg, ${theme.accent}, ${theme.highlight}, ${theme.accent})` }}
+              <motion.h1
+                animate={{ opacity: 1, x: 0 }}
+                className="bg-clip-text text-xl font-bold text-transparent md:text-2xl"
+                initial={{ opacity: 0, x: -20 }}
+                style={{
+                  backgroundImage: `linear-gradient(45deg, ${theme.accent}, ${theme.accent}66)`,
+                  fontFamily: "'Aptos Display', 'Segoe UI', sans-serif",
+                }}
+                transition={{ duration: 0.5 }}
               >
-                ZestSend
-              </p>
+                <a
+                  href="https://github.com/RavelloH/ZestSend"
+                  rel="noopener noreferrer"
+                  target="_blank"
+                >
+                  ZestSend
+                </a>
+              </motion.h1>
               <p className="truncate text-lg font-bold tracking-[0.06em] text-sky-100/65 sm:text-xl"># {roomId}</p>
             </div>
             <p className="inline-flex items-center gap-1.5 text-xs font-bold tracking-[0.05em] text-emerald-300">
@@ -997,7 +1160,7 @@ function RoomWorkspace({
                         typingLabel={workspace.typing}
                       />
                     ) : activeWorkspace === "files" ? (
-                      <FileWorkspace locale={locale} ready={progress.dataChannel.state === "active"} />
+                      <FileWorkspace accent={theme.accent} files={fileTransfers} locale={locale} onAccept={onAcceptFile} onCancel={onCancelFile} onDelete={onDeleteFile} onDownload={onDownloadFile} onOffer={onOfferFiles} onPause={onPauseFile} onResend={onResendFile} ready={progress.dataChannel.state === "active"} />
                     ) : activeWorkspace === "status" ? (
                       <div className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
                         <OverlayScrollbar
@@ -1126,8 +1289,11 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const [error, setError] = useState<string | null>(null);
   const [connectionRoute, setConnectionRoute] = useState<ConnectionRoute>("direct");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [fileTransfers, setFileTransfers] = useState<FileTransferSnapshot[]>([]);
   const [peerTyping, setPeerTyping] = useState(false);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
+  const fileTransfersRef = useRef<FileTransferSnapshot[]>([]);
+  const fileTransferRefreshTimerRef = useRef<number | null>(null);
   const peerTypingTimerRef = useRef<number | null>(null);
   const [progress, setProgress] = useState<ConnectionProgress>({
     websocket: { state: "pending", detail: "Waiting for signaling socket" },
@@ -1138,7 +1304,50 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     dataChannel: { channels: 0, state: "pending", detail: "Waiting for data channel" },
   });
   const sessionRef = useRef<NativeWebRTCSession | null>(null);
+  const fileManagerRef = useRef<FileTransferManager | null>(null);
   const lastTypingSentAtRef = useRef(0);
+
+  useEffect(() => {
+    const manager = new FileTransferManager({
+      onError: (id, message) => setError(message),
+      onOffer: () => undefined,
+      onRemove: (id) => {
+        fileTransfersRef.current = fileTransfersRef.current.filter((file) => file.id !== id);
+        setFileTransfers(fileTransfersRef.current);
+      },
+      onUpdate: (snapshot) => {
+        const current = fileTransfersRef.current;
+        const index = current.findIndex((item) => item.id === snapshot.id);
+        const previous = index < 0 ? undefined : current[index];
+        const next = index < 0 ? [...current, snapshot] : current.map((item, itemIndex) => itemIndex === index ? snapshot : item);
+        fileTransfersRef.current = next;
+        const stateChanged = !previous || previous.state !== snapshot.state || previous.error !== snapshot.error;
+        if (stateChanged) {
+          if (fileTransferRefreshTimerRef.current !== null) window.clearTimeout(fileTransferRefreshTimerRef.current);
+          fileTransferRefreshTimerRef.current = null;
+          setFileTransfers(next);
+          return;
+        }
+        if (fileTransferRefreshTimerRef.current === null) {
+          fileTransferRefreshTimerRef.current = window.setTimeout(() => {
+            fileTransferRefreshTimerRef.current = null;
+            setFileTransfers(fileTransfersRef.current);
+          }, 1_000);
+        }
+      },
+      sendBulk: (data) => sessionRef.current?.sendBulk(data) ?? false,
+      sendControl: (message) => sessionRef.current?.sendControlMessage(message) ?? false,
+    });
+    fileManagerRef.current = manager;
+    return () => {
+      if (fileTransferRefreshTimerRef.current !== null) window.clearTimeout(fileTransferRefreshTimerRef.current);
+      fileTransferRefreshTimerRef.current = null;
+      void manager.dispose();
+      fileManagerRef.current = null;
+      fileTransfersRef.current = [];
+      setFileTransfers([]);
+    };
+  }, [roomId]);
 
   const updateChatMessages = (update: (messages: ChatMessage[]) => ChatMessage[]) => {
     setChatMessages((current) => {
@@ -1163,6 +1372,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
             ? { ...message, deliveryStatus: "sending", lastAttemptedAt: Date.now() }
             : message));
         }
+        fileManagerRef.current?.onTransportReady();
         setDialogPhase("closing-for-ready");
       },
       setError,
@@ -1204,6 +1414,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       },
     );
     sessionRef.current = session;
+    session.attachFileTransferManager(fileManagerRef.current);
     session.connect();
 
     return () => {
@@ -1218,8 +1429,24 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     sessionRef.current?.close();
     chatMessagesRef.current = [];
     setChatMessages([]);
+    void fileManagerRef.current?.dispose();
+    if (fileTransferRefreshTimerRef.current !== null) window.clearTimeout(fileTransferRefreshTimerRef.current);
+    fileTransferRefreshTimerRef.current = null;
+    fileTransfersRef.current = [];
+    setFileTransfers([]);
     void navigate({ to: locale === "zh" ? "/zh" : "/en" });
   };
+
+  const offerFiles = (files: FileList | File[]) => {
+    for (const file of Array.from(files)) fileManagerRef.current?.offerFile(file, cuid());
+  };
+
+  const acceptFile = (id: string) => { void fileManagerRef.current?.acceptFile(id); };
+  const cancelFile = (id: string) => fileManagerRef.current?.cancelFile(id);
+  const deleteFile = (id: string) => fileManagerRef.current?.deleteFile(id);
+  const downloadFile = (id: string) => { fileManagerRef.current?.downloadFile(id); };
+  const pauseFile = (id: string) => { void fileManagerRef.current?.togglePause(id); };
+  const resendFile = (id: string) => { fileManagerRef.current?.resendFile(id, cuid()); };
 
   const sendChatMessage = (text: string): boolean => {
     const message = text.trim();
@@ -1264,12 +1491,20 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       ) : dialogPhase === "ready" || dialogPhase === "closing-for-reconnect" ? (
         <RoomWorkspace
           chatMessages={chatMessages}
+          fileTransfers={fileTransfers}
           locale={locale}
           onExitComplete={() => {
             if (dialogPhase === "closing-for-reconnect") setDialogPhase("connecting");
           }}
           onLeave={leave}
           onChatTyping={sendChatTyping}
+          onAcceptFile={acceptFile}
+          onCancelFile={cancelFile}
+          onDeleteFile={deleteFile}
+          onDownloadFile={downloadFile}
+          onOfferFiles={offerFiles}
+          onPauseFile={pauseFile}
+          onResendFile={resendFile}
           onMarkChatMessageRead={markChatMessageRead}
           onSendChatMessage={sendChatMessage}
           open={dialogPhase === "ready"}

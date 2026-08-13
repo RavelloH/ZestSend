@@ -22,6 +22,8 @@ export type ConnectionProgress = {
 
 export type ConnectionRoute = "direct" | "relay";
 
+import type { FileTransferManager, FileTransferSnapshot } from "./file-transfer";
+
 type SignalMessage = {
   payload?: {
     candidate?: RTCIceCandidateInit;
@@ -479,6 +481,7 @@ export class NativeWebRTCSession {
   private receivedBytes = 0;
   private receivedChatIds = new Set<string>();
   private sentBytes = 0;
+  private fileTransferManager: FileTransferManager | null = null;
 
   constructor(
     private readonly roomId: string,
@@ -531,6 +534,14 @@ export class NativeWebRTCSession {
     return this.sendOnChannel("bulk", data);
   }
 
+  sendControlMessage(message: { type: string; [key: string]: unknown }): boolean {
+    return this.sendOnChannel("control", JSON.stringify(message));
+  }
+
+  attachFileTransferManager(manager: FileTransferManager | null): void {
+    this.fileTransferManager = manager;
+  }
+
   sendChatMessage(id: string, text: string): boolean {
     const message = text.trim();
     if (!id || id.length > 128 || !message || message.length > 4_000) return false;
@@ -540,9 +551,14 @@ export class NativeWebRTCSession {
   private sendOnChannel(channelName: DataChannelName, data: string | ArrayBuffer | Blob): boolean {
     const channel = this.channels[channelName];
     if (channel?.readyState !== "open") return false;
-    if (typeof data === "string") channel.send(data);
-    else if (data instanceof Blob) channel.send(data);
-    else channel.send(data);
+    if (channelName === "bulk" && channel.bufferedAmount > 3 * 1024 * 1024) return false;
+    try {
+      if (typeof data === "string") channel.send(data);
+      else if (data instanceof Blob) channel.send(data);
+      else channel.send(data);
+    } catch {
+      return false;
+    }
     this.sentBytes += dataSize(data);
     this.updateDataTransferProgress();
     return true;
@@ -636,7 +652,7 @@ export class NativeWebRTCSession {
     if (!this.readyForPeerConnection || this.peer || this.closed) return;
     const peer = this.createPeerConnection();
     for (const channelName of DATA_CHANNEL_NAMES) {
-      this.attachDataChannel(peer.createDataChannel(channelName, { ordered: true }));
+      this.attachDataChannel(peer.createDataChannel(channelName, { ordered: channelName !== "bulk" }));
     }
     this.setStep("p2p", { state: "checking", detail: "Creating P2P offer" });
     const offer = await peer.createOffer();
@@ -714,6 +730,7 @@ export class NativeWebRTCSession {
       this.updateDataTransferProgress();
       if (channelName === "control") this.handleDataChannelMessage(event.data);
       if (channelName === "interactive") this.handleInteractiveMessage(event.data);
+      if (channelName === "bulk" && event.data instanceof ArrayBuffer) this.fileTransferManager?.handleSegment(event.data);
     };
     channel.onclose = () => this.handlePeerDisconnect();
     channel.onerror = () => this.handlePeerDisconnect();
@@ -817,6 +834,8 @@ export class NativeWebRTCSession {
     } catch {
       return;
     }
+
+    this.fileTransferManager?.handleControl(message as unknown as { type: string; [key: string]: unknown });
 
     if (message.type === "chat-received" || message.type === "chat-read") {
       if (typeof message.id === "string" && message.id.length > 0 && message.id.length <= 128) {
