@@ -16,6 +16,7 @@ interface ClickableProps extends Omit<
   hoverScale?: number;
   tapScale?: number;
   duration?: number;
+  interactive?: boolean;
   "aria-label"?: string;
 }
 
@@ -30,6 +31,7 @@ export const Clickable = forwardRef<HTMLDivElement, ClickableProps>(
       hoverScale = 1.16,
       tapScale = 0.94,
       duration = 0.16,
+      interactive = true,
       "aria-label": ariaLabel,
       ...props
     },
@@ -50,17 +52,17 @@ export const Clickable = forwardRef<HTMLDivElement, ClickableProps>(
     return (
       <motion.div
         ref={ref}
-        aria-disabled={disabled}
+        aria-disabled={interactive ? disabled : undefined}
         aria-label={ariaLabel}
         className={cn(
           "inline-flex select-none items-center justify-center rounded-none outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60",
-          disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer",
+          interactive && (disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"),
           className,
         )}
-        onClick={handleClick}
-        onKeyDown={handleKeyDown}
-        role="button"
-        tabIndex={disabled ? -1 : 0}
+        onClick={interactive ? handleClick : undefined}
+        onKeyDown={interactive ? handleKeyDown : undefined}
+        role={interactive ? "button" : undefined}
+        tabIndex={interactive ? disabled ? -1 : 0 : undefined}
         transition={{ duration, ease: "easeOut" }}
         whileHover={!disabled && enableHoverScale ? { scale: hoverScale } : undefined}
         whileTap={!disabled ? { scale: tapScale } : undefined}

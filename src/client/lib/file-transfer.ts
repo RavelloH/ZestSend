@@ -9,7 +9,7 @@ const FILE_MAGIC = 0x5a534631;
 const FILE_TEMP_PREFIX = "zestsend-";
 const FILE_TEMP_SUFFIX = ".part";
 
-export type FileTransferState = "queued" | "offered" | "waiting" | "transferring" | "complete" | "cancelled" | "error";
+export type FileTransferState = "offered" | "waiting" | "transferring" | "complete" | "cancelled" | "error";
 export type FileTransferDirection = "outgoing" | "incoming";
 
 export type FileTransferSnapshot = {
@@ -180,6 +180,7 @@ export class FileTransferManager {
   private files = new Map<string, FileRecord>();
   private worker = new Worker(new URL("./file-receive.worker.ts", import.meta.url), { type: "module" });
   private readonly temporaryFileCleanup: Promise<void>;
+  private incomingActivation: Promise<boolean> = Promise.resolve(false);
   private receiverReady = new Map<string, { reject: (reason?: unknown) => void; resolve: () => void }>();
   private receiverClosed = new Map<string, { reject: (reason?: unknown) => void; resolve: () => void }>();
 
@@ -218,6 +219,7 @@ export class FileTransferManager {
   async togglePause(id: string): Promise<void> {
     const record = this.files.get(id);
     if (!record || record.state !== "transferring") return;
+    if (record.direction === "incoming" && record.paused) this.pauseOtherIncoming(record.id);
     record.paused = !record.paused;
     this.callbacks.sendControl({ type: record.paused ? "PAUSE" : "RESUME", transferId: id });
     if (!record.paused && record.direction === "outgoing") void this.pumpOutgoing(record);
@@ -248,11 +250,13 @@ export class FileTransferManager {
 
   offerFile(file: File, id: string): boolean {
     const record = asRecord(file, "outgoing", id);
-    record.state = "queued";
+    record.state = "offered";
     record.blockHashes = [];
     this.files.set(id, record);
+    this.callbacks.sendControl({
+      type: "FILE_OFFER", transferId: id, name: file.name, size: file.size, mimeType: record.mimeType, completedBlocks: [],
+    });
     this.emit(record);
-    this.offerNextOutgoing();
     return true;
   }
 
@@ -266,10 +270,6 @@ export class FileTransferManager {
       }
       if (existing?.direction === "incoming" && existing.state === "offered") {
         this.callbacks.onOffer(this.snapshot(existing));
-        return;
-      }
-      if ([...this.files.values()].some((item) => item.direction === "incoming" && ["waiting", "transferring", "offered"].includes(item.state))) {
-        this.callbacks.sendControl({ type: "FILE_REJECT", transferId: id, reason: "busy" });
         return;
       }
       const fake = new File([], message.name, { type: typeof message.mimeType === "string" ? message.mimeType : "application/octet-stream" });
@@ -348,8 +348,6 @@ export class FileTransferManager {
         this.callbacks.sendControl({ type: "FILE_COMMIT", transferId: id });
         this.emit(record);
       } else void this.pumpOutgoing(record);
-    } else if (message.type === "FILE_ACK" && record.direction === "outgoing" && record.state === "complete") {
-      this.offerNextOutgoing();
     } else if (message.type === "BLOCK_NACK" && record.direction === "outgoing") {
       const blockIndex = Number(message.blockIndex);
       const retries = (record.retryCount.get(blockIndex) ?? 0) + 1;
@@ -387,6 +385,12 @@ export class FileTransferManager {
   }
 
   async acceptFile(id: string): Promise<boolean> {
+    const activate = () => this.acceptIncomingFile(id);
+    this.incomingActivation = this.incomingActivation.then(activate, activate);
+    return this.incomingActivation;
+  }
+
+  private async acceptIncomingFile(id: string): Promise<boolean> {
     const record = this.files.get(id);
     if (!record || record.direction !== "incoming" || record.state !== "offered") return false;
     await this.temporaryFileCleanup;
@@ -398,6 +402,7 @@ export class FileTransferManager {
     }
     try {
       record.target = await this.createTarget(record);
+      this.pauseOtherIncoming(record.id);
       record.state = "transferring";
       this.startTransfer(record);
       this.callbacks.sendControl({ type: "FILE_ACCEPT", transferId: id, credit: FILE_INITIAL_CREDIT, completedBlocks: [...record.completedBlocks] });
@@ -422,15 +427,13 @@ export class FileTransferManager {
     if (!record) return;
     const previousState = record.state;
     record.state = "cancelled";
-    if (previousState !== "queued") {
-      this.callbacks.sendControl({ type: record.direction === "incoming" && previousState === "offered" ? "FILE_REJECT" : "CANCEL", transferId: id });
-    }
+    this.callbacks.sendControl({ type: record.direction === "incoming" && previousState === "offered" ? "FILE_REJECT" : "CANCEL", transferId: id });
     this.removeRecord(record);
   }
 
   onTransportReady(): void {
     for (const record of this.files.values()) {
-      if (record.state === "complete" || record.state === "cancelled" || record.state === "error" || record.state === "queued") continue;
+      if (record.state === "complete" || record.state === "cancelled" || record.state === "error") continue;
       if (record.direction === "outgoing") {
         record.inFlightBlocks.clear();
         record.inFlightBytes = 0;
@@ -438,21 +441,18 @@ export class FileTransferManager {
         while (record.completedBlocks.has(record.nextBlockIndex)) record.nextBlockIndex += 1;
         this.callbacks.sendControl({ type: "FILE_OFFER", transferId: record.id, name: record.name, size: record.size, mimeType: record.mimeType, completedBlocks: [...record.completedBlocks] });
       } else if (record.state === "transferring") {
-        this.callbacks.sendControl({ type: "FILE_ACCEPT", transferId: record.id, credit: FILE_INITIAL_CREDIT, completedBlocks: [...record.completedBlocks] });
+        this.callbacks.sendControl({ type: record.paused ? "PAUSE" : "FILE_ACCEPT", transferId: record.id, credit: FILE_INITIAL_CREDIT, completedBlocks: [...record.completedBlocks] });
       }
     }
-    this.offerNextOutgoing();
   }
 
-  private offerNextOutgoing(): void {
-    if ([...this.files.values()].some((record) => record.direction === "outgoing" && (record.state === "offered" || record.state === "transferring"))) return;
-    const next = [...this.files.values()].find((record) => record.direction === "outgoing" && record.state === "queued");
-    if (!next) return;
-    next.state = "offered";
-    this.callbacks.sendControl({
-      type: "FILE_OFFER", transferId: next.id, name: next.name, size: next.size, mimeType: next.mimeType, completedBlocks: [],
-    });
-    this.emit(next);
+  private pauseOtherIncoming(activeId: string): void {
+    for (const record of this.files.values()) {
+      if (record.id === activeId || record.direction !== "incoming" || record.state !== "transferring" || record.paused) continue;
+      record.paused = true;
+      this.callbacks.sendControl({ type: "PAUSE", transferId: record.id });
+      this.emit(record);
+    }
   }
 
   private async sendNextBlock(record: FileRecord, blockIndex: number): Promise<void> {
@@ -671,7 +671,6 @@ export class FileTransferManager {
     void this.removeTemporaryFile(record);
     this.files.delete(record.id);
     this.emitRemoved(record.id);
-    if (record.direction === "outgoing") this.offerNextOutgoing();
   }
 
   private fail(record: FileRecord, error: string): void {
@@ -682,6 +681,5 @@ export class FileTransferManager {
     console.error("ZestSend file transfer failed", { error, id: record.id, name: record.name });
     this.callbacks.onError(record.id, error);
     this.emit(record);
-    if (record.direction === "outgoing") this.offerNextOutgoing();
   }
 }
