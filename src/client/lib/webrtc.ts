@@ -80,8 +80,6 @@ type DataChannelName = "bulk" | "control" | "interactive";
 
 const DATA_CHANNEL_NAMES: DataChannelName[] = ["control", "interactive", "bulk"];
 const DATA_CHANNEL_COUNT = DATA_CHANNEL_NAMES.length;
-// Kept local to development while validating relay-path behavior.
-const FORCE_TURN_RELAY_FOR_DIAGNOSTICS = true;
 const textEncoder = new TextEncoder();
 
 function isDataChannelName(label: string): label is DataChannelName {
@@ -570,7 +568,6 @@ export class NativeWebRTCSession {
 
   attachFileTransferManager(manager: FileTransferManager | null): void {
     this.fileTransferManager = manager;
-    if (manager && FORCE_TURN_RELAY_FOR_DIAGNOSTICS) manager.setConnectionRoute("relay");
   }
 
   sendChatMessage(id: string, text: string): boolean {
@@ -758,9 +755,7 @@ export class NativeWebRTCSession {
   }
 
   private createPeerConnection(): RTCPeerConnection {
-    // Development weak-network test mode: prevent direct host/srflx paths so
-    // every room data channel traverses the configured TURN relay.
-    const peer = new RTCPeerConnection({ iceServers: this.selectedServers, iceTransportPolicy: FORCE_TURN_RELAY_FOR_DIAGNOSTICS ? "relay" : "all" });
+    const peer = new RTCPeerConnection({ iceServers: this.selectedServers });
     this.peer = peer;
     peer.onicecandidate = ({ candidate }) => {
       if (candidate) this.sendSignal({ candidate: asCandidate(candidate) });

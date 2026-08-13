@@ -31,3 +31,6 @@ pnpm-lock.yaml
 *.tar.z
 
 *.tar.lz4
+*.log
+backup/
+settings.json
