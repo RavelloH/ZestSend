@@ -595,10 +595,6 @@ function useTransferRates(transferred?: { received: number; sent: number }) {
 
 function DataTransferStats({ transferred, mode = "totals" }: { transferred?: { received: number; sent: number }; mode?: "rates" | "totals" }) {
   const rates = useTransferRates(transferred);
-  return <TransferStatsDisplay mode={mode} rates={rates} transferred={transferred} />;
-}
-
-function TransferStatsDisplay({ rates, transferred, mode = "totals" }: { rates: { received: number; sent: number }; transferred?: { received: number; sent: number }; mode?: "rates" | "totals" }) {
   const sent = transferred?.sent ?? 0;
   const received = transferred?.received ?? 0;
   const separator = <motion.span layout="position" className="mx-2 font-mono text-sky-100/35">·</motion.span>;
@@ -613,12 +609,84 @@ function TransferStatsDisplay({ rates, transferred, mode = "totals" }: { rates: 
     <NumberFlowGroup>
       <motion.div
         layout="position"
-        className="flex shrink-0 flex-wrap items-baseline gap-y-1 whitespace-nowrap text-xs font-medium text-sky-100/55 sm:text-sm"
+        className="flex shrink-0 flex-wrap items-baseline gap-y-1 text-xs font-medium text-sky-100/55 sm:text-sm"
         transition={{ layout: { duration: 0.42, ease: "easeOut" } }}
       >
         {mode === "totals" ? <>{metric("up", sent)}{separator}{metric("down", received)}{separator}<motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><FileSizeValue bytes={rates.sent + rates.received} suffix="/s" /></motion.span></> : <>{metric("up", rates.sent, "/s")}{separator}{metric("down", rates.received, "/s")}</>}
       </motion.div>
     </NumberFlowGroup>
+  );
+}
+
+function HeaderConnectionToggle({
+  connectionRoute,
+  encryptedLabel,
+  encryptedRelayLabel,
+  latency,
+  showRates,
+  transferred,
+}: {
+  connectionRoute: ConnectionRoute;
+  encryptedLabel: string;
+  encryptedRelayLabel: string;
+  latency?: number;
+  showRates: boolean;
+  transferred?: { received: number; sent: number };
+}) {
+  const [displayRates, setDisplayRates] = useState(showRates);
+  const [phase, setPhase] = useState<"entering" | "exiting" | "visible">("visible");
+  const requestedRatesRef = useRef(showRates);
+  requestedRatesRef.current = showRates;
+
+  useEffect(() => {
+    if (phase === "visible" && displayRates !== showRates) setPhase("exiting");
+    if (phase === "entering" && displayRates !== showRates) setPhase("exiting");
+  }, [displayRates, phase, showRates]);
+
+  const finishAnimation = () => {
+    if (phase === "exiting") {
+      setDisplayRates(requestedRatesRef.current);
+      setPhase("entering");
+      return;
+    }
+    if (phase === "entering") setPhase("visible");
+  };
+
+  return (
+    <motion.span
+      animate={{ opacity: phase === "exiting" ? 0 : 1 }}
+      className="inline-flex min-w-0 items-center"
+      initial={false}
+      onAnimationComplete={finishAnimation}
+      transition={{ duration: 0.2, ease: "easeOut" }}
+    >
+      {displayRates ? <DataTransferStats mode="rates" transferred={transferred} /> : (
+        <motion.div
+          layout="position"
+          className="inline-flex min-w-0 items-center gap-1.5 text-xs font-bold tracking-[0.05em]"
+          transition={{ layout: { duration: 0.32, ease: "easeOut" } }}
+        >
+          <RiLock2Fill aria-hidden="true" className="size-4 shrink-0 text-emerald-300" />
+          <motion.span layout="position" className="whitespace-nowrap text-emerald-300" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>
+            {connectionRoute === "relay" ? encryptedRelayLabel : encryptedLabel}
+          </motion.span>
+          <motion.span layout="position" className="text-slate-400/60" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>|</motion.span>
+          <motion.span layout="position" className={latency === undefined ? "text-slate-400" : latencyColor(latency, true)} transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>
+            <SignalIcon className="size-4 shrink-0" level={signalLevel(latency)} />
+          </motion.span>
+          <NumberFlowGroup>
+            <motion.span
+              layout="position"
+              className={`inline-flex shrink-0 items-baseline font-mono tabular-nums ${latency === undefined ? "text-slate-400" : latencyColor(latency, true)}`}
+              transition={{ layout: { duration: 0.32, ease: "easeOut" } }}
+            >
+              {latency === undefined ? <motion.span layout="position">--</motion.span> : <NumberFlow value={Math.round(latency)} willChange />}
+              <motion.span layout="position" className="ml-1" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>ms</motion.span>
+            </motion.span>
+          </NumberFlowGroup>
+        </motion.div>
+      )}
+    </motion.span>
   );
 }
 
@@ -1166,7 +1234,6 @@ function RoomWorkspace({
   const [isExitDialogOpen, setExitDialogOpen] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
   const [showConnectionRates, setShowConnectionRates] = useState(false);
-  const connectionRates = useTransferRates(progress.dataChannel.transferred);
   const exitTimerRef = useRef<number | null>(null);
   const observedChatMessageCount = useRef(chatMessages.length);
 
@@ -1273,39 +1340,19 @@ function RoomWorkspace({
             </div>
             <Clickable
               aria-label={showConnectionRates ? "Show connection quality" : "Show transfer rates"}
-              className="shrink-0"
+              className="min-w-0"
               hoverScale={1.025}
               onClick={() => setShowConnectionRates((current) => !current)}
               tapScale={0.98}
             >
-              <AutoTransition as="span" className="inline-flex shrink-0 items-center" duration={0.2} presenceMode="wait" transitionKey={showConnectionRates ? "rates" : "connection"} type="fade">
-                {showConnectionRates ? <TransferStatsDisplay mode="rates" rates={connectionRates} transferred={progress.dataChannel.transferred} /> : (
-            <motion.div
-              layout="position"
-              className="inline-flex min-w-0 items-center gap-1.5 text-xs font-bold tracking-[0.05em]"
-              transition={{ layout: { duration: 0.32, ease: "easeOut" } }}
-            >
-              <RiLock2Fill aria-hidden="true" className="size-4 shrink-0 text-emerald-300" />
-              <motion.span layout="position" className="whitespace-nowrap text-emerald-300" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>
-                {connectionRoute === "relay" ? copy.encryptedRelay : copy.encrypted}
-              </motion.span>
-              <motion.span layout="position" className="text-slate-400/60" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>|</motion.span>
-              <motion.span layout="position" className={progress.p2p.latency === undefined ? "text-slate-400" : latencyColor(progress.p2p.latency, true)} transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>
-                <SignalIcon className="size-4 shrink-0" level={signalLevel(progress.p2p.latency)} />
-              </motion.span>
-              <NumberFlowGroup>
-                <motion.span
-                  layout="position"
-                  className={`inline-flex shrink-0 items-baseline font-mono tabular-nums ${progress.p2p.latency === undefined ? "text-slate-400" : latencyColor(progress.p2p.latency, true)}`}
-                  transition={{ layout: { duration: 0.32, ease: "easeOut" } }}
-                >
-                  {progress.p2p.latency === undefined ? <motion.span layout="position">--</motion.span> : <NumberFlow value={Math.round(progress.p2p.latency)} willChange />}
-                  <motion.span layout="position" className="ml-1" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>ms</motion.span>
-                </motion.span>
-              </NumberFlowGroup>
-            </motion.div>
-                )}
-              </AutoTransition>
+              <HeaderConnectionToggle
+                connectionRoute={connectionRoute}
+                encryptedLabel={copy.encrypted}
+                encryptedRelayLabel={copy.encryptedRelay}
+                latency={progress.p2p.latency}
+                showRates={showConnectionRates}
+                transferred={progress.dataChannel.transferred}
+              />
             </Clickable>
           </header>
 

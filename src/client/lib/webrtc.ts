@@ -518,7 +518,11 @@ export class NativeWebRTCSession {
     private readonly onChatReceipt: (id: string, status: ChatReceiptStatus) => void,
     private readonly onChatTyping: () => void,
   ) {
-    this.mediaTransport = new MediaTransport((message) => this.sendControlMessage(message));
+    this.mediaTransport = new MediaTransport(
+      (message) => this.sendControlMessage(message),
+      undefined,
+      () => this.updateDataTransferProgress(),
+    );
   }
 
   connect(): void {
@@ -1043,7 +1047,8 @@ export class NativeWebRTCSession {
   }
 
   private dataTransfer(): { received: number; sent: number } {
-    return { received: this.receivedBytes, sent: this.sentBytes };
+    const traffic = this.mediaTransport.traffic;
+    return { received: this.receivedBytes + traffic.received, sent: this.sentBytes + traffic.sent };
   }
 
   private closeDataChannels(): void {
