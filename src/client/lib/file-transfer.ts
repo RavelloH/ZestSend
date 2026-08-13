@@ -4,6 +4,9 @@ export const FILE_MEMORY_LIMIT = 512 * 1024 * 1024;
 const FILE_PERSISTENCE_THRESHOLD = 2 * 1024 * 1024 * 1024;
 export const FILE_INITIAL_CREDIT = 4 * FILE_BLOCK_SIZE;
 export const FILE_MAX_CREDIT = 16 * FILE_BLOCK_SIZE;
+const FILE_RELAY_INITIAL_CREDIT = 2 * FILE_BLOCK_SIZE;
+const FILE_DIRECT_MAX_IN_FLIGHT_BLOCKS = 4;
+const FILE_RELAY_MAX_IN_FLIGHT_BLOCKS = 2;
 const FILE_HEADER_SIZE = 32;
 const FILE_MAGIC = 0x5a534631;
 const FILE_TEMP_PREFIX = "zestsend-";
@@ -28,6 +31,22 @@ export type FileTransferSnapshot = {
   duration: number | null;
   error?: string;
   url?: string;
+};
+
+export type FileTransferDiagnostics = {
+  blockCount: number;
+  blockSize: number;
+  completedBlocks: number;
+  connectionRoute: "direct" | "relay";
+  direction: FileTransferDirection;
+  inFlightBlocks: number;
+  inFlightBytes: number;
+  maxInFlightBlocks: number;
+  pendingReceiveBlocks: number;
+  remoteCredit: number;
+  retries: number;
+  segmentSize: number;
+  transferId: string;
 };
 
 type WireMessage = {
@@ -183,6 +202,7 @@ export class FileTransferManager {
   private incomingActivation: Promise<boolean> = Promise.resolve(false);
   private receiverReady = new Map<string, { reject: (reason?: unknown) => void; resolve: () => void }>();
   private receiverClosed = new Map<string, { reject: (reason?: unknown) => void; resolve: () => void }>();
+  private connectionRoute: "direct" | "relay" = "direct";
 
   constructor(private readonly callbacks: FileTransferCallbacks) {
     this.worker.onmessage = (event: MessageEvent<{ blockIndex?: number; byteLength?: number; error?: string; transferId: string; type: string }>) => {
@@ -212,8 +232,42 @@ export class FileTransferManager {
     this.receiverClosed.clear();
   }
 
+  setConnectionRoute(route: "direct" | "relay"): void {
+    if (this.connectionRoute === route) return;
+    this.connectionRoute = route;
+
+    for (const record of this.files.values()) {
+      if (record.direction !== "incoming" || record.state !== "transferring") continue;
+      this.callbacks.sendControl({
+        type: "FLOW_UPDATE",
+        transferId: record.id,
+        credit: this.initialCredit(),
+      });
+    }
+  }
+
   get snapshots(): FileTransferSnapshot[] {
     return [...this.files.values()].map(({ file: _file, completedBlocks: _blocks, receiverBlocks: _receiver, chunks: _chunks, retryCount: _retry, target: _target, blockHashes: _hashes, ...snapshot }) => snapshot);
+  }
+
+  getDiagnostics(id: string): FileTransferDiagnostics | null {
+    const record = this.files.get(id);
+    if (!record) return null;
+    return {
+      blockCount: Math.ceil(record.size / FILE_BLOCK_SIZE),
+      blockSize: FILE_BLOCK_SIZE,
+      completedBlocks: record.completedBlocks.size,
+      connectionRoute: this.connectionRoute,
+      direction: record.direction,
+      inFlightBlocks: record.inFlightBlocks.size,
+      inFlightBytes: record.inFlightBytes,
+      maxInFlightBlocks: this.maxInFlightBlocks(),
+      pendingReceiveBlocks: record.receiverBlocks.size,
+      remoteCredit: record.remoteCredit,
+      retries: [...record.retryCount.values()].reduce((total, attempts) => total + attempts, 0),
+      segmentSize: FILE_SEGMENT_SIZE,
+      transferId: record.id,
+    };
   }
 
   async togglePause(id: string): Promise<void> {
@@ -265,7 +319,7 @@ export class FileTransferManager {
     if (message.type === "FILE_OFFER" && id && typeof message.name === "string" && typeof message.size === "number") {
       const existing = this.files.get(id);
       if (existing?.direction === "incoming" && existing.state === "transferring") {
-        this.callbacks.sendControl({ type: "FILE_ACCEPT", transferId: id, credit: FILE_INITIAL_CREDIT, completedBlocks: [...existing.completedBlocks] });
+        this.callbacks.sendControl({ type: "FILE_ACCEPT", transferId: id, credit: this.initialCredit(), completedBlocks: [...existing.completedBlocks] });
         return;
       }
       if (existing?.direction === "incoming" && existing.state === "offered") {
@@ -405,8 +459,8 @@ export class FileTransferManager {
       this.pauseOtherIncoming(record.id);
       record.state = "transferring";
       this.startTransfer(record);
-      this.callbacks.sendControl({ type: "FILE_ACCEPT", transferId: id, credit: FILE_INITIAL_CREDIT, completedBlocks: [...record.completedBlocks] });
-      this.callbacks.sendControl({ type: "FLOW_UPDATE", transferId: id, credit: FILE_INITIAL_CREDIT });
+      this.callbacks.sendControl({ type: "FILE_ACCEPT", transferId: id, credit: this.initialCredit(), completedBlocks: [...record.completedBlocks] });
+      this.callbacks.sendControl({ type: "FLOW_UPDATE", transferId: id, credit: this.initialCredit() });
       this.emit(record);
       return true;
     } catch (error) {
@@ -441,7 +495,7 @@ export class FileTransferManager {
         while (record.completedBlocks.has(record.nextBlockIndex)) record.nextBlockIndex += 1;
         this.callbacks.sendControl({ type: "FILE_OFFER", transferId: record.id, name: record.name, size: record.size, mimeType: record.mimeType, completedBlocks: [...record.completedBlocks] });
       } else if (record.state === "transferring") {
-        this.callbacks.sendControl({ type: record.paused ? "PAUSE" : "FILE_ACCEPT", transferId: record.id, credit: FILE_INITIAL_CREDIT, completedBlocks: [...record.completedBlocks] });
+        this.callbacks.sendControl({ type: record.paused ? "PAUSE" : "FILE_ACCEPT", transferId: record.id, credit: this.initialCredit(), completedBlocks: [...record.completedBlocks] });
       }
     }
   }
@@ -484,11 +538,19 @@ export class FileTransferManager {
   }
 
   private async pumpOutgoing(record: FileRecord): Promise<void> {
-    while (!record.paused && record.state === "transferring" && record.inFlightBlocks.size < 4 && record.inFlightBytes < record.remoteCredit && record.nextBlockIndex * FILE_BLOCK_SIZE < record.size) {
+    while (!record.paused && record.state === "transferring" && record.inFlightBlocks.size < this.maxInFlightBlocks() && record.inFlightBytes < record.remoteCredit && record.nextBlockIndex * FILE_BLOCK_SIZE < record.size) {
       const blockIndex = record.nextBlockIndex;
       record.nextBlockIndex += 1;
       void this.sendNextBlock(record, blockIndex);
     }
+  }
+
+  private initialCredit(): number {
+    return this.connectionRoute === "relay" ? FILE_RELAY_INITIAL_CREDIT : FILE_INITIAL_CREDIT;
+  }
+
+  private maxInFlightBlocks(): number {
+    return this.connectionRoute === "relay" ? FILE_RELAY_MAX_IN_FLIGHT_BLOCKS : FILE_DIRECT_MAX_IN_FLIGHT_BLOCKS;
   }
 
   private async completeReceivedBlock(result: { blockIndex: number; byteLength: number; transferId: string }): Promise<void> {

@@ -22,7 +22,27 @@ export type ConnectionProgress = {
 
 export type ConnectionRoute = "direct" | "relay";
 
+export type WebRTCTransportDiagnostics = {
+  availableOutgoingBitrate: number | null;
+  bufferedAmount: Record<DataChannelName, number | null>;
+  bytesReceived: number | null;
+  bytesSent: number | null;
+  currentRoundTripTime: number | null;
+  localCandidateType: string | null;
+  localProtocol: string | null;
+  packetsRetransmitted: number | null;
+  packetsDiscardedOnSend: number | null;
+  remoteCandidateType: string | null;
+  remoteProtocol: string | null;
+  relayProtocol: string | null;
+  sctpCongestionWindow: number | null;
+  sctpReceiverWindow: number | null;
+  sctpSmoothedRoundTripTime: number | null;
+  sctpState: string | null;
+};
+
 import type { FileTransferManager, FileTransferSnapshot } from "./file-transfer";
+import { MediaTransport, type MediaSlotControlMessage } from "./media-transport";
 
 type SignalMessage = {
   payload?: {
@@ -48,7 +68,7 @@ type ChatTypingMessage = {
   type: "chat-typing";
 };
 
-type DataChannelControlMessage = DataChannelPingMessage | ChatReceiptMessage | ChatTypingMessage;
+type DataChannelControlMessage = DataChannelPingMessage | ChatReceiptMessage | ChatTypingMessage | MediaSlotControlMessage;
 
 export type InteractiveMessage = {
   id: string;
@@ -60,6 +80,8 @@ type DataChannelName = "bulk" | "control" | "interactive";
 
 const DATA_CHANNEL_NAMES: DataChannelName[] = ["control", "interactive", "bulk"];
 const DATA_CHANNEL_COUNT = DATA_CHANNEL_NAMES.length;
+// Kept local to development while validating relay-path behavior.
+const FORCE_TURN_RELAY_FOR_DIAGNOSTICS = true;
 const textEncoder = new TextEncoder();
 
 function isDataChannelName(label: string): label is DataChannelName {
@@ -482,6 +504,7 @@ export class NativeWebRTCSession {
   private receivedChatIds = new Set<string>();
   private sentBytes = 0;
   private fileTransferManager: FileTransferManager | null = null;
+  private mediaTransport: MediaTransport;
 
   constructor(
     private readonly roomId: string,
@@ -494,7 +517,9 @@ export class NativeWebRTCSession {
     private readonly onInteractiveMessage: (message: InteractiveMessage) => void,
     private readonly onChatReceipt: (id: string, status: ChatReceiptStatus) => void,
     private readonly onChatTyping: () => void,
-  ) {}
+  ) {
+    this.mediaTransport = new MediaTransport((message) => this.sendControlMessage(message));
+  }
 
   connect(): void {
     this.setStep("websocket", { state: "checking", detail: "Opening signaling socket" });
@@ -522,6 +547,7 @@ export class NativeWebRTCSession {
     this.stopSocketLatencyProbe();
     this.stopDataChannelLatencyProbe();
     this.closeDataChannels();
+    this.mediaTransport.dispose();
     this.peer?.close();
     this.socket?.close();
   }
@@ -540,6 +566,7 @@ export class NativeWebRTCSession {
 
   attachFileTransferManager(manager: FileTransferManager | null): void {
     this.fileTransferManager = manager;
+    if (manager && FORCE_TURN_RELAY_FOR_DIAGNOSTICS) manager.setConnectionRoute("relay");
   }
 
   sendChatMessage(id: string, text: string): boolean {
@@ -566,6 +593,69 @@ export class NativeWebRTCSession {
 
   get dataChannel(): RTCDataChannel | null {
     return this.channels.interactive;
+  }
+
+  get media(): MediaTransport {
+    return this.mediaTransport;
+  }
+
+  async getTransportDiagnostics(): Promise<WebRTCTransportDiagnostics> {
+    const bufferedAmount: WebRTCTransportDiagnostics["bufferedAmount"] = {
+      bulk: this.channels.bulk?.readyState === "open" ? this.channels.bulk.bufferedAmount : null,
+      control: this.channels.control?.readyState === "open" ? this.channels.control.bufferedAmount : null,
+      interactive: this.channels.interactive?.readyState === "open" ? this.channels.interactive.bufferedAmount : null,
+    };
+    const fallback = {
+      availableOutgoingBitrate: null,
+      bufferedAmount,
+      bytesReceived: null,
+      bytesSent: null,
+      currentRoundTripTime: null,
+      localCandidateType: null,
+      localProtocol: null,
+      packetsRetransmitted: null,
+      packetsDiscardedOnSend: null,
+      remoteCandidateType: null,
+      remoteProtocol: null,
+      relayProtocol: null,
+      sctpCongestionWindow: null,
+      sctpReceiverWindow: null,
+      sctpSmoothedRoundTripTime: null,
+      sctpState: null,
+    } satisfies WebRTCTransportDiagnostics;
+    if (!this.peer) return fallback;
+
+    try {
+      const stats = await this.peer.getStats();
+      for (const report of stats.values()) {
+        if (report.type !== "candidate-pair" || report.state !== "succeeded") continue;
+        if (report.selected !== true && report.nominated !== true) continue;
+        const local = report.localCandidateId ? stats.get(report.localCandidateId) : undefined;
+        const remote = report.remoteCandidateId ? stats.get(report.remoteCandidateId) : undefined;
+        const sctp = [...stats.values()].find((entry) => entry.type === "sctp");
+        return {
+          availableOutgoingBitrate: typeof report.availableOutgoingBitrate === "number" ? report.availableOutgoingBitrate : null,
+          bufferedAmount,
+          bytesReceived: typeof report.bytesReceived === "number" ? report.bytesReceived : null,
+          bytesSent: typeof report.bytesSent === "number" ? report.bytesSent : null,
+          currentRoundTripTime: typeof report.currentRoundTripTime === "number" ? report.currentRoundTripTime * 1_000 : null,
+          localCandidateType: typeof local?.candidateType === "string" ? local.candidateType : null,
+          localProtocol: typeof local?.protocol === "string" ? local.protocol : null,
+          packetsRetransmitted: typeof report.packetsRetransmitted === "number" ? report.packetsRetransmitted : null,
+          packetsDiscardedOnSend: typeof report.packetsDiscardedOnSend === "number" ? report.packetsDiscardedOnSend : null,
+          remoteCandidateType: typeof remote?.candidateType === "string" ? remote.candidateType : null,
+          remoteProtocol: typeof remote?.protocol === "string" ? remote.protocol : null,
+          relayProtocol: typeof local?.relayProtocol === "string" ? local.relayProtocol : null,
+          sctpCongestionWindow: typeof sctp?.congestionWindow === "number" ? sctp.congestionWindow : null,
+          sctpReceiverWindow: typeof sctp?.receiverWindow === "number" ? sctp.receiverWindow : null,
+          sctpSmoothedRoundTripTime: typeof sctp?.smoothedRoundTripTime === "number" ? sctp.smoothedRoundTripTime * 1_000 : null,
+          sctpState: typeof sctp?.state === "string" ? sctp.state : null,
+        };
+      }
+    } catch {
+      // The diagnostics view remains useful even if this browser withholds stats.
+    }
+    return fallback;
   }
 
   private async prepareIceServers(): Promise<void> {
@@ -633,6 +723,7 @@ export class NativeWebRTCSession {
       this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
       this.setStep("dataChannel", { channels: 0, state: "pending", detail: "Waiting for data channel", transferred: this.dataTransfer() });
       this.closeDataChannels();
+      this.mediaTransport.detachPeer();
       this.peer?.close();
       this.peer = null;
       this.onPeerLeft();
@@ -651,6 +742,7 @@ export class NativeWebRTCSession {
   private async createOffer(): Promise<void> {
     if (!this.readyForPeerConnection || this.peer || this.closed) return;
     const peer = this.createPeerConnection();
+    this.mediaTransport.prepareOffer(peer);
     for (const channelName of DATA_CHANNEL_NAMES) {
       this.attachDataChannel(peer.createDataChannel(channelName, { ordered: channelName !== "bulk" }));
     }
@@ -661,11 +753,14 @@ export class NativeWebRTCSession {
   }
 
   private createPeerConnection(): RTCPeerConnection {
-    const peer = new RTCPeerConnection({ iceServers: this.selectedServers });
+    // Development weak-network test mode: prevent direct host/srflx paths so
+    // every room data channel traverses the configured TURN relay.
+    const peer = new RTCPeerConnection({ iceServers: this.selectedServers, iceTransportPolicy: FORCE_TURN_RELAY_FOR_DIAGNOSTICS ? "relay" : "all" });
     this.peer = peer;
     peer.onicecandidate = ({ candidate }) => {
       if (candidate) this.sendSignal({ candidate: asCandidate(candidate) });
     };
+    peer.ontrack = (event) => this.mediaTransport.handleRemoteTrack(event);
     peer.onconnectionstatechange = () => {
       if (peer.connectionState === "failed") this.fail("P2P connection failed.");
       if (peer.connectionState === "connected") {
@@ -688,6 +783,7 @@ export class NativeWebRTCSession {
         const peer = this.peer ?? this.createPeerConnection();
         await peer.setRemoteDescription(description);
         if (description.type === "offer") {
+          this.mediaTransport.bindIncomingPeer(peer);
           this.setStep("p2p", { state: "checking", detail: "Accepting P2P offer" });
           const answer = await peer.createAnswer();
           await peer.setLocalDescription(answer);
@@ -744,6 +840,7 @@ export class NativeWebRTCSession {
     this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
     this.setStep("dataChannel", { channels: 0, state: "pending", detail: "Waiting for data channel", transferred: this.dataTransfer() });
     this.closeDataChannels();
+    this.mediaTransport.detachPeer();
     const peer = this.peer;
     this.peer = null;
     peer?.close();
@@ -760,7 +857,9 @@ export class NativeWebRTCSession {
         if (report.selected !== true && report.nominated !== true) continue;
 
         const localCandidate = report.localCandidateId ? stats.get(report.localCandidateId) : undefined;
-        this.onConnectionRoute(localCandidate?.candidateType === "relay" ? "relay" : "direct");
+        const route = localCandidate?.candidateType === "relay" ? "relay" : "direct";
+        this.fileTransferManager?.setConnectionRoute(route);
+        this.onConnectionRoute(route);
         return;
       }
     } catch {
@@ -836,6 +935,7 @@ export class NativeWebRTCSession {
     }
 
     this.fileTransferManager?.handleControl(message as unknown as { type: string; [key: string]: unknown });
+    if (this.mediaTransport.handleControlMessage(message)) return;
 
     if (message.type === "chat-received" || message.type === "chat-read") {
       if (typeof message.id === "string" && message.id.length > 0 && message.id.length <= 128) {

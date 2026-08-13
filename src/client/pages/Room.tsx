@@ -55,16 +55,17 @@ import Layout from "../components/Layout";
 import { useTheme } from "../components/theme";
 import { AutoTransition } from "../components/ui/auto-transition";
 import { Clickable } from "../components/ui/clickable";
-import { Dialog, DialogContent } from "../components/ui/dialog";
+import { Dialog, DialogClose, DialogContent } from "../components/ui/dialog";
 import { MagneticDock, type DockItemData } from "../components/ui/magnetic-dock";
 import { OverlayScrollbar } from "../components/ui/overlay-scrollbar";
-import { FileTransferManager, type FileTransferSnapshot } from "../lib/file-transfer";
+import { FileTransferManager, type FileTransferDiagnostics, type FileTransferSnapshot } from "../lib/file-transfer";
 import {
   NativeWebRTCSession,
   type ConnectionRoute,
   type ConnectionProgress,
   type ConnectionState,
   type ConnectionStep,
+  type WebRTCTransportDiagnostics,
 } from "../lib/webrtc";
 
 type StatusRowProps = {
@@ -594,6 +595,10 @@ function useTransferRates(transferred?: { received: number; sent: number }) {
 
 function DataTransferStats({ transferred, mode = "totals" }: { transferred?: { received: number; sent: number }; mode?: "rates" | "totals" }) {
   const rates = useTransferRates(transferred);
+  return <TransferStatsDisplay mode={mode} rates={rates} transferred={transferred} />;
+}
+
+function TransferStatsDisplay({ rates, transferred, mode = "totals" }: { rates: { received: number; sent: number }; transferred?: { received: number; sent: number }; mode?: "rates" | "totals" }) {
   const sent = transferred?.sent ?? 0;
   const received = transferred?.received ?? 0;
   const separator = <motion.span layout="position" className="mx-2 font-mono text-sky-100/35">·</motion.span>;
@@ -608,7 +613,7 @@ function DataTransferStats({ transferred, mode = "totals" }: { transferred?: { r
     <NumberFlowGroup>
       <motion.div
         layout="position"
-        className="flex shrink-0 flex-wrap items-baseline gap-y-1 text-xs font-medium text-sky-100/55 sm:text-sm"
+        className="flex shrink-0 flex-wrap items-baseline gap-y-1 whitespace-nowrap text-xs font-medium text-sky-100/55 sm:text-sm"
         transition={{ layout: { duration: 0.42, ease: "easeOut" } }}
       >
         {mode === "totals" ? <>{metric("up", sent)}{separator}{metric("down", received)}{separator}<motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><FileSizeValue bytes={rates.sent + rates.received} suffix="/s" /></motion.span></> : <>{metric("up", rates.sent, "/s")}{separator}{metric("down", rates.received, "/s")}</>}
@@ -905,13 +910,37 @@ function EtaValue({ seconds }: { seconds: number | null }) {
   </motion.span>;
 }
 
-function FileWorkspace({ accent, files, locale, onAccept, onCancel, onDelete, onDownload, onOffer, onPause, onResend, ready }: {
+function formatByteCount(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB"];
+  let value = Math.max(0, bytes);
+  let unitIndex = 0;
+  while (value >= 1_024 && unitIndex < units.length - 1) {
+    value /= 1_024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 || unitIndex === 0 ? Math.round(value) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function DiagnosticItem({ label, value }: { label: string; value: string }) {
+  return <div className="min-w-0 border-b border-white/10 py-2.5 first:pt-0 sm:[&:nth-child(-n+3)]:pt-0">
+    <p className="text-[0.65rem] font-bold tracking-[0.12em] text-sky-100/45">{label}</p>
+    <p className="mt-1 truncate font-mono text-xs font-medium tracking-[0.02em] text-sky-50/85 sm:text-sm">{value}</p>
+  </div>;
+}
+
+type TransferDiagnostics = {
+  file: FileTransferDiagnostics;
+  transport: WebRTCTransportDiagnostics;
+};
+
+function FileWorkspace({ accent, files, locale, onAccept, onCancel, onDelete, onDiagnostics, onDownload, onOffer, onPause, onResend, ready }: {
   accent: string;
   files: FileTransferSnapshot[];
   locale: RoomLocale;
   onAccept: (id: string) => void;
   onCancel: (id: string) => void;
   onDelete: (id: string) => void;
+  onDiagnostics: (id: string) => Promise<TransferDiagnostics | null>;
   onDownload: (id: string) => void;
   onPause: (id: string) => void;
   onOffer: (files: FileList | File[]) => void;
@@ -921,7 +950,10 @@ function FileWorkspace({ accent, files, locale, onAccept, onCancel, onDelete, on
   const [isDragging, setIsDragging] = useState(false);
   const dragDepthRef = useRef(0);
   const [previewFile, setPreviewFile] = useState<FileTransferSnapshot | null>(null);
+  const [diagnosticFile, setDiagnosticFile] = useState<FileTransferSnapshot | null>(null);
+  const [diagnostics, setDiagnostics] = useState<TransferDiagnostics | null>(null);
   const pickerRef = useRef<HTMLInputElement>(null);
+  const diagnosticClicksRef = useRef(new Map<string, { count: number; timer: number }>());
   const copy = locale === "zh"
     ? { accept: "接收", reject: "拒绝", cancel: "取消", choose: "拖入、粘贴或选择文件", empty: "选择文件以发送", offered: "对方向你发送了一个文件", sending: "正在发送", waiting: "等待对方确认", receiving: "正在接收", paused: "已暂停", complete: "传输完成", cancelled: "已取消", error: "传输失败", preview: "预览", view: "查看", pause: "暂停", resume: "继续", stop: "停止", save: "保存", remove: "删除", resend: "再次发送", previewUnsupported: "不支持预览此文件类型" }
     : { accept: "Receive", reject: "Reject", cancel: "Cancel", choose: "Drop, paste, or choose files", empty: "Choose files to send", offered: "The other participant wants to send you a file", sending: "Sending", waiting: "Waiting for acceptance", receiving: "Receiving", paused: "Paused", complete: "Transfer complete", cancelled: "Cancelled", error: "Transfer failed", preview: "Preview", view: "View", pause: "Pause", resume: "Resume", stop: "Stop", save: "Save", remove: "Delete", resend: "Send again", previewUnsupported: "This file type cannot be previewed" };
@@ -944,6 +976,39 @@ function FileWorkspace({ accent, files, locale, onAccept, onCancel, onDelete, on
       window.addEventListener("paste", onPaste);
       return () => window.removeEventListener("paste", onPaste);
     }, [onOffer, ready]);
+
+  useEffect(() => {
+    if (!diagnosticFile) return;
+    let cancelled = false;
+    const refresh = async () => {
+      const snapshot = await onDiagnostics(diagnosticFile.id);
+      if (!cancelled) setDiagnostics(snapshot);
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 1_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [diagnosticFile, onDiagnostics]);
+
+  useEffect(() => () => {
+    diagnosticClicksRef.current.forEach(({ timer }) => window.clearTimeout(timer));
+    diagnosticClicksRef.current.clear();
+  }, []);
+
+  const openDiagnostics = (file: FileTransferSnapshot) => {
+    const current = diagnosticClicksRef.current.get(file.id);
+    if (current) window.clearTimeout(current.timer);
+    const count = (current?.count ?? 0) + 1;
+    const timer = window.setTimeout(() => diagnosticClicksRef.current.delete(file.id), 500);
+    diagnosticClicksRef.current.set(file.id, { count, timer });
+    if (count !== 3) return;
+    window.clearTimeout(timer);
+    diagnosticClicksRef.current.delete(file.id);
+    setDiagnostics(null);
+    setDiagnosticFile(file);
+  };
 
   return (
     <WorkspaceShell
@@ -998,7 +1063,7 @@ function FileWorkspace({ accent, files, locale, onAccept, onCancel, onDelete, on
         else if (isIncoming && file.state === "complete") actions = [action(copy.view, RiEyeLine, preview, { backgroundColor: `${accent}40` }), action(copy.save, RiDownload2Line, () => onDownload(file.id), { backgroundColor: "rgba(16, 185, 129, 0.28)" }), action(copy.remove, RiDeleteBinLine, () => onDelete(file.id), { backgroundColor: "rgba(244, 63, 94, 0.28)" })];
         else if (!isIncoming && file.state === "complete") actions = [action(copy.view, RiEyeLine, preview, { backgroundColor: `${accent}40` }), action(copy.resend, RiRefreshLine, () => onResend(file.id), { backgroundColor: "rgba(16, 185, 129, 0.28)" }), action(copy.cancel, RiDeleteBinLine, () => onDelete(file.id), { backgroundColor: "rgba(244, 63, 94, 0.28)" })];
         else actions = [action(copy.view, RiEyeLine, preview), action(active && !file.paused ? copy.pause : copy.resume, file.paused ? RiPlayLine : RiPauseLine, () => onPause(file.id), { backgroundColor: "rgba(16, 185, 129, 0.28)" }, !active), action(copy.cancel, RiCloseCircleFill, () => onCancel(file.id), { backgroundColor: "rgba(244, 63, 94, 0.28)" })];
-        return <motion.article animate={{ opacity: 1, y: 0 }} className="overflow-hidden border-b border-white/10 pb-4" exit={{ height: 0, opacity: 0, y: -10, paddingBottom: 0 }} initial={{ opacity: 0, y: 10 }} key={file.id} layout transition={{ layout: { duration: 0.3, ease: "easeOut" }, opacity: { duration: 0.18 }, height: { duration: 0.26, ease: "easeInOut" }, y: { duration: 0.22, ease: "easeOut" } }}><div className="flex min-w-0 items-stretch gap-3"><button aria-label={file.name} className="grid aspect-square w-16 shrink-0 place-items-center text-sky-200/65" type="button"><Icon aria-hidden="true" className="size-11" /></button><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold tracking-[0.04em] text-sky-50">{file.name}</p><div className="mt-3 space-y-1.5"><div className="h-1.5 overflow-hidden rounded-full bg-white/10"><motion.div animate={{ width: `${progress}%` }} className="h-full rounded-full" initial={{ width: "0%" }} style={{ backgroundColor: accent }} transition={{ type: "spring", stiffness: 220, damping: 28 }} /></div><div className="h-1.5 overflow-hidden rounded-full bg-white/[0.07]"><motion.div animate={{ width: `${confirmed}%` }} className="h-full rounded-full bg-sky-100/45" initial={{ width: "0%" }} transition={{ type: "spring", stiffness: 220, damping: 28 }} /></div></div><NumberFlowGroup><motion.div layout="position" className="mt-2 flex flex-wrap items-baseline gap-y-1 text-xs font-medium text-sky-100/45" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><NumberFlow value={Math.round(progress)} willChange /><motion.span layout="position">%</motion.span></motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><FileSizeValue bytes={file.transferredBytes} /><motion.span layout="position" className="mx-1">/</motion.span><FileSizeValue bytes={file.size} /></motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums">{displaySpeed > 0 ? <FileSizeValue bytes={displaySpeed} suffix="/s" /> : <motion.span layout="position">-- /s</motion.span>}</motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><EtaValue seconds={eta} /></motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex"><AutoTransition as="span" className="inline-flex tracking-[0.03em]" duration={0.18} presenceMode="wait" transitionKey={`${file.state}-${file.paused}-${file.error ?? ""}`} type="fade">{stateLabel(file)}</AutoTransition></motion.span></motion.div></NumberFlowGroup><div className="mt-3 grid grid-cols-3 gap-2">{actions}</div></div></div></motion.article>;
+        return <motion.article animate={{ opacity: 1, y: 0 }} className="overflow-hidden border-b border-white/10 pb-4" exit={{ height: 0, opacity: 0, y: -10, paddingBottom: 0 }} initial={{ opacity: 0, y: 10 }} key={file.id} layout transition={{ layout: { duration: 0.3, ease: "easeOut" }, opacity: { duration: 0.18 }, height: { duration: 0.26, ease: "easeInOut" }, y: { duration: 0.22, ease: "easeOut" } }}><div className="flex min-w-0 items-stretch gap-3"><button aria-label={file.name} className="grid aspect-square w-16 shrink-0 place-items-center text-sky-200/65" onClick={() => openDiagnostics(file)} type="button"><Icon aria-hidden="true" className="size-11" /></button><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold tracking-[0.04em] text-sky-50">{file.name}</p><div className="mt-3 space-y-1.5"><div className="h-1.5 overflow-hidden rounded-full bg-white/10"><motion.div animate={{ width: `${progress}%` }} className="h-full rounded-full" initial={{ width: "0%" }} style={{ backgroundColor: accent }} transition={{ type: "spring", stiffness: 220, damping: 28 }} /></div><div className="h-1.5 overflow-hidden rounded-full bg-white/[0.07]"><motion.div animate={{ width: `${confirmed}%` }} className="h-full rounded-full bg-sky-100/45" initial={{ width: "0%" }} transition={{ type: "spring", stiffness: 220, damping: 28 }} /></div></div><NumberFlowGroup><motion.div layout="position" className="mt-2 flex flex-wrap items-baseline gap-y-1 text-xs font-medium text-sky-100/45" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><NumberFlow value={Math.round(progress)} willChange /><motion.span layout="position">%</motion.span></motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><FileSizeValue bytes={file.transferredBytes} /><motion.span layout="position" className="mx-1">/</motion.span><FileSizeValue bytes={file.size} /></motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums">{displaySpeed > 0 ? <FileSizeValue bytes={displaySpeed} suffix="/s" /> : <motion.span layout="position">-- /s</motion.span>}</motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex items-baseline font-mono tabular-nums"><EtaValue seconds={eta} /></motion.span><motion.span layout="position" className="mx-2 font-mono">·</motion.span><motion.span layout="position" className="inline-flex"><AutoTransition as="span" className="inline-flex tracking-[0.03em]" duration={0.18} presenceMode="wait" transitionKey={`${file.state}-${file.paused}-${file.error ?? ""}`} type="fade">{stateLabel(file)}</AutoTransition></motion.span></motion.div></NumberFlowGroup><div className="mt-3 grid grid-cols-3 gap-2">{actions}</div></div></div></motion.article>;
       })}</AnimatePresence></div>}
       <Dialog open={previewFile !== null} onOpenChange={(open) => { if (!open) setPreviewFile(null); }}>
         <DialogContent aria-labelledby="file-preview-title" className="!max-w-md">
@@ -1006,6 +1071,41 @@ function FileWorkspace({ accent, files, locale, onAccept, onCancel, onDelete, on
             <p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{locale === "zh" ? "文件预览" : "FILE PREVIEW"}</p>
             <h2 className="mt-3 truncate text-xl font-bold tracking-[0.04em] text-sky-50 sm:text-2xl" id="file-preview-title">{previewFile?.name}</h2>
             <p className="mt-5 text-sm font-medium tracking-[0.04em] text-sky-100/60">{copy.previewUnsupported}</p>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={diagnosticFile !== null} onOpenChange={(open) => { if (!open) { setDiagnosticFile(null); setDiagnostics(null); } }}>
+        <DialogContent aria-labelledby="file-diagnostics-title" className="!max-w-2xl">
+          <div className="flex min-w-0 flex-col">
+            <div className="flex items-start justify-between gap-5 border-b border-white/10 p-5 sm:p-6">
+              <div className="min-w-0">
+                <p className="text-[0.65rem] font-bold tracking-[0.14em] text-sky-100/45">{locale === "zh" ? "传输诊断" : "TRANSFER DIAGNOSTICS"}</p>
+                <h2 className="mt-2 truncate text-lg font-bold tracking-[0.04em] text-sky-50 sm:text-xl" id="file-diagnostics-title">{diagnosticFile?.name}</h2>
+              </div>
+              <DialogClose aria-label={locale === "zh" ? "关闭传输诊断" : "Close transfer diagnostics"} data-dialog-autofocus />
+            </div>
+            {diagnostics ? <div className="grid grid-cols-2 gap-x-6 px-5 py-4 sm:grid-cols-3 sm:px-6">
+              <DiagnosticItem label={locale === "zh" ? "连接路径" : "Route"} value={diagnostics.file.connectionRoute === "relay" ? "TURN relay" : "Direct"} />
+              <DiagnosticItem label={locale === "zh" ? "ICE RTT" : "ICE RTT"} value={diagnostics.transport.currentRoundTripTime === null ? "--" : `${Math.round(diagnostics.transport.currentRoundTripTime)} ms`} />
+              <DiagnosticItem label={locale === "zh" ? "TURN 传输协议" : "TURN transport"} value={diagnostics.transport.relayProtocol?.toUpperCase() ?? "--"} />
+              <DiagnosticItem label={locale === "zh" ? "本地 / 远端协议" : "Local / remote protocol"} value={`${diagnostics.transport.localProtocol?.toUpperCase() ?? "--"} / ${diagnostics.transport.remoteProtocol?.toUpperCase() ?? "--"}`} />
+              <DiagnosticItem label={locale === "zh" ? "分块 / 分段" : "Block / segment"} value={`${formatByteCount(diagnostics.file.blockSize)} / ${formatByteCount(diagnostics.file.segmentSize)}`} />
+              <DiagnosticItem label={locale === "zh" ? "飞行窗口" : "In-flight window"} value={`${diagnostics.file.inFlightBlocks} / ${diagnostics.file.maxInFlightBlocks} blocks`} />
+              <DiagnosticItem label={locale === "zh" ? "已确认区块" : "Confirmed blocks"} value={`${diagnostics.file.completedBlocks} / ${diagnostics.file.blockCount}`} />
+              <DiagnosticItem label={locale === "zh" ? "远端 Credit" : "Remote credit"} value={formatByteCount(diagnostics.file.remoteCredit)} />
+              <DiagnosticItem label={locale === "zh" ? "Bulk 缓冲" : "Bulk buffer"} value={diagnostics.transport.bufferedAmount.bulk === null ? "--" : formatByteCount(diagnostics.transport.bufferedAmount.bulk)} />
+              <DiagnosticItem label={locale === "zh" ? "未确认字节" : "Unconfirmed bytes"} value={formatByteCount(diagnostics.file.inFlightBytes)} />
+              <DiagnosticItem label={locale === "zh" ? "接收重组队列" : "Receive assembly"} value={`${diagnostics.file.pendingReceiveBlocks} blocks`} />
+              <DiagnosticItem label={locale === "zh" ? "完整性重试" : "Integrity retries"} value={String(diagnostics.file.retries)} />
+              <DiagnosticItem label={locale === "zh" ? "候选对" : "Candidate pair"} value={`${diagnostics.transport.localCandidateType ?? "--"} -> ${diagnostics.transport.remoteCandidateType ?? "--"}`} />
+              <DiagnosticItem label={locale === "zh" ? "可用上行带宽" : "Available uplink"} value={diagnostics.transport.availableOutgoingBitrate === null ? "--" : `${formatByteCount(diagnostics.transport.availableOutgoingBitrate / 8)}/s`} />
+              <DiagnosticItem label={locale === "zh" ? "候选对发送 / 接收" : "Pair sent / received"} value={diagnostics.transport.bytesSent === null || diagnostics.transport.bytesReceived === null ? "--" : `${formatByteCount(diagnostics.transport.bytesSent)} / ${formatByteCount(diagnostics.transport.bytesReceived)}`} />
+              <DiagnosticItem label={locale === "zh" ? "发送侧丢弃" : "Discarded on send"} value={diagnostics.transport.packetsDiscardedOnSend === null ? "--" : String(diagnostics.transport.packetsDiscardedOnSend)} />
+              <DiagnosticItem label={locale === "zh" ? "SCTP 状态" : "SCTP state"} value={diagnostics.transport.sctpState ?? "--"} />
+              <DiagnosticItem label={locale === "zh" ? "SCTP 平滑 RTT" : "SCTP smoothed RTT"} value={diagnostics.transport.sctpSmoothedRoundTripTime === null ? "--" : `${Math.round(diagnostics.transport.sctpSmoothedRoundTripTime)} ms`} />
+              <DiagnosticItem label={locale === "zh" ? "SCTP 拥塞窗口" : "SCTP congestion window"} value={diagnostics.transport.sctpCongestionWindow === null ? "--" : formatByteCount(diagnostics.transport.sctpCongestionWindow)} />
+              <DiagnosticItem label={locale === "zh" ? "SCTP 接收窗口" : "SCTP receiver window"} value={diagnostics.transport.sctpReceiverWindow === null ? "--" : formatByteCount(diagnostics.transport.sctpReceiverWindow)} />
+            </div> : <p className="px-5 py-6 text-sm font-medium tracking-[0.04em] text-sky-100/55 sm:px-6">{locale === "zh" ? "正在读取本地传输状态..." : "Reading local transfer state..."}</p>}
           </div>
         </DialogContent>
       </Dialog>
@@ -1024,6 +1124,7 @@ function RoomWorkspace({
   onAcceptFile,
   onCancelFile,
   onDeleteFile,
+  onFileDiagnostics,
   onDownloadFile,
   onOfferFiles,
   onPauseFile,
@@ -1045,6 +1146,7 @@ function RoomWorkspace({
   onAcceptFile: (id: string) => void;
   onCancelFile: (id: string) => void;
   onDeleteFile: (id: string) => void;
+  onFileDiagnostics: (id: string) => Promise<TransferDiagnostics | null>;
   onDownloadFile: (id: string) => void;
   onOfferFiles: (files: FileList | File[]) => void;
   onPauseFile: (id: string) => void;
@@ -1064,6 +1166,7 @@ function RoomWorkspace({
   const [isExitDialogOpen, setExitDialogOpen] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
   const [showConnectionRates, setShowConnectionRates] = useState(false);
+  const connectionRates = useTransferRates(progress.dataChannel.transferred);
   const exitTimerRef = useRef<number | null>(null);
   const observedChatMessageCount = useRef(chatMessages.length);
 
@@ -1170,28 +1273,30 @@ function RoomWorkspace({
             </div>
             <Clickable
               aria-label={showConnectionRates ? "Show connection quality" : "Show transfer rates"}
-              className="min-w-0"
+              className="shrink-0"
               hoverScale={1.025}
               onClick={() => setShowConnectionRates((current) => !current)}
               tapScale={0.98}
             >
-              <AutoTransition as="span" className="inline-flex min-w-0 items-center" duration={0.2} presenceMode="wait" transitionKey={showConnectionRates ? "rates" : "connection"} type="fade">
-                {showConnectionRates ? <DataTransferStats mode="rates" transferred={progress.dataChannel.transferred} /> : (
+              <AutoTransition as="span" className="inline-flex shrink-0 items-center" duration={0.2} presenceMode="wait" transitionKey={showConnectionRates ? "rates" : "connection"} type="fade">
+                {showConnectionRates ? <TransferStatsDisplay mode="rates" rates={connectionRates} transferred={progress.dataChannel.transferred} /> : (
             <motion.div
               layout="position"
-              className={`inline-flex min-w-0 items-center gap-1.5 text-xs font-bold tracking-[0.05em] ${progress.p2p.latency === undefined ? "text-slate-400" : latencyColor(progress.p2p.latency, true)}`}
+              className="inline-flex min-w-0 items-center gap-1.5 text-xs font-bold tracking-[0.05em]"
               transition={{ layout: { duration: 0.32, ease: "easeOut" } }}
             >
               <RiLock2Fill aria-hidden="true" className="size-4 shrink-0 text-emerald-300" />
-              <motion.span layout="position" className="whitespace-nowrap" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>
+              <motion.span layout="position" className="whitespace-nowrap text-emerald-300" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>
                 {connectionRoute === "relay" ? copy.encryptedRelay : copy.encrypted}
               </motion.span>
               <motion.span layout="position" className="text-slate-400/60" transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>|</motion.span>
-              <SignalIcon className="size-4 shrink-0" level={signalLevel(progress.p2p.latency)} />
+              <motion.span layout="position" className={progress.p2p.latency === undefined ? "text-slate-400" : latencyColor(progress.p2p.latency, true)} transition={{ layout: { duration: 0.32, ease: "easeOut" } }}>
+                <SignalIcon className="size-4 shrink-0" level={signalLevel(progress.p2p.latency)} />
+              </motion.span>
               <NumberFlowGroup>
                 <motion.span
                   layout="position"
-                  className="inline-flex shrink-0 items-baseline font-mono tabular-nums"
+                  className={`inline-flex shrink-0 items-baseline font-mono tabular-nums ${progress.p2p.latency === undefined ? "text-slate-400" : latencyColor(progress.p2p.latency, true)}`}
                   transition={{ layout: { duration: 0.32, ease: "easeOut" } }}
                 >
                   {progress.p2p.latency === undefined ? <motion.span layout="position">--</motion.span> : <NumberFlow value={Math.round(progress.p2p.latency)} willChange />}
@@ -1244,7 +1349,7 @@ function RoomWorkspace({
                         typingLabel={workspace.typing}
                       />
                     ) : activeWorkspace === "files" ? (
-                      <FileWorkspace accent={theme.accent} files={fileTransfers} locale={locale} onAccept={onAcceptFile} onCancel={onCancelFile} onDelete={onDeleteFile} onDownload={onDownloadFile} onOffer={onOfferFiles} onPause={onPauseFile} onResend={onResendFile} ready={progress.dataChannel.state === "active"} />
+                      <FileWorkspace accent={theme.accent} files={fileTransfers} locale={locale} onAccept={onAcceptFile} onCancel={onCancelFile} onDelete={onDeleteFile} onDiagnostics={onFileDiagnostics} onDownload={onDownloadFile} onOffer={onOfferFiles} onPause={onPauseFile} onResend={onResendFile} ready={progress.dataChannel.state === "active"} />
                     ) : activeWorkspace === "status" ? (
                       <div className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
                         <OverlayScrollbar
@@ -1531,6 +1636,28 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const downloadFile = (id: string) => { fileManagerRef.current?.downloadFile(id); };
   const pauseFile = (id: string) => { void fileManagerRef.current?.togglePause(id); };
   const resendFile = (id: string) => { fileManagerRef.current?.resendFile(id, cuid()); };
+  const getFileDiagnostics = async (id: string): Promise<TransferDiagnostics | null> => {
+    const file = fileManagerRef.current?.getDiagnostics(id);
+    if (!file) return null;
+    return { file, transport: await sessionRef.current?.getTransportDiagnostics() ?? {
+      availableOutgoingBitrate: null,
+      bufferedAmount: { bulk: null, control: null, interactive: null },
+      bytesReceived: null,
+      bytesSent: null,
+      currentRoundTripTime: null,
+      localCandidateType: null,
+      localProtocol: null,
+      packetsRetransmitted: null,
+      packetsDiscardedOnSend: null,
+      remoteCandidateType: null,
+      remoteProtocol: null,
+      relayProtocol: null,
+      sctpCongestionWindow: null,
+      sctpReceiverWindow: null,
+      sctpSmoothedRoundTripTime: null,
+      sctpState: null,
+    } };
+  };
 
   const sendChatMessage = (text: string): boolean => {
     const message = text.trim();
@@ -1585,6 +1712,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
           onAcceptFile={acceptFile}
           onCancelFile={cancelFile}
           onDeleteFile={deleteFile}
+          onFileDiagnostics={getFileDiagnostics}
           onDownloadFile={downloadFile}
           onOfferFiles={offerFiles}
           onPauseFile={pauseFile}
