@@ -17,7 +17,7 @@ export type ThemeId =
   | "lunar-ash"
   | "verdant-relay"
   | "coral-ping"
-  | "deep-space";
+  | "citron-relay";
 
 export type AppTheme = {
   accent: string;
@@ -112,7 +112,7 @@ export const appThemes: readonly AppTheme[] = [
     accent: "#ff9b8f",
   },
   {
-    id: "deep-space",
+    id: "citron-relay",
     name: { en: "Citron Relay", zh: "柠檬中继" },
     description: { en: "Bright enough to make packets pucker.", zh: "亮得让数据包都眯起眼" },
     deep: "#100f02",

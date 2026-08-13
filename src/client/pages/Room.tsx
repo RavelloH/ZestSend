@@ -1,5 +1,6 @@
 import {
   RiArrowLeftLine,
+  RiAddLine,
   RiCheckboxCircleFill,
   RiCheckDoubleLine,
   RiCheckLine,
@@ -28,7 +29,7 @@ import NumberFlow, { continuous, NumberFlowGroup } from "@number-flow/react";
 import { useNavigate } from "@tanstack/react-router";
 import cuid from "cuid";
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { type DragEventHandler, type ReactNode, useEffect, useRef, useState } from "react";
 
 import Layout from "../components/Layout";
 import { useTheme } from "../components/theme";
@@ -58,6 +59,50 @@ type ChatMessage = {
   sender: "local" | "remote";
   sentAt: number;
 };
+
+const workspaceShellClassName = "flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl";
+const workspaceScrollClassName = "min-h-0 flex-1 px-2 pb-7 pt-4 pr-5 [mask-image:linear-gradient(to_bottom,transparent_0%,black_4rem,black_calc(100%-3rem),transparent_100%)]";
+const workspaceComposerClassName = "relative h-28 shrink-0";
+
+function WorkspaceShell({
+  children,
+  footer,
+  onDragEnter,
+  onDragLeave,
+  onDragOver,
+  onDrop,
+  onSubmit,
+  scrollKey,
+}: {
+  children: ReactNode;
+  footer: ReactNode;
+  onDragEnter?: DragEventHandler<HTMLElement>;
+  onDragLeave?: DragEventHandler<HTMLElement>;
+  onDragOver?: DragEventHandler<HTMLElement>;
+  onDrop?: DragEventHandler<HTMLElement>;
+  onSubmit?: () => void;
+  scrollKey: string | number;
+}) {
+  return (
+    <section
+      className={workspaceShellClassName}
+      onDragEnter={onDragEnter}
+      onDragLeave={onDragLeave}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+    >
+      <OverlayScrollbar className={workspaceScrollClassName} syncKey={scrollKey}>
+        {children}
+      </OverlayScrollbar>
+      <form className="relative shrink-0 border-t border-white/10 pt-4" onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit?.();
+      }}>
+        <div className={workspaceComposerClassName}>{footer}</div>
+      </form>
+    </section>
+  );
+}
 
 function appendChatMessage(messages: ChatMessage[], message: ChatMessage): ChatMessage[] {
   return [...messages, message].sort((left, right) => left.id.localeCompare(right.id));
@@ -609,11 +654,52 @@ function ChatWorkspace({
   };
 
   return (
-    <section className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
-      <OverlayScrollbar
-        className="min-h-0 flex-1 px-2 pb-7 pt-4 pr-5 [mask-image:linear-gradient(to_bottom,transparent_0%,black_4rem,black_calc(100%-3rem),transparent_100%)]"
-        syncKey={messages.length}
-      >
+    <WorkspaceShell
+      footer={(
+        <>
+          <AutoTransition
+            as="span"
+            aria-live="polite"
+            className="absolute -top-5 left-4 text-xs font-medium tracking-[0.04em] text-sky-100/45"
+            duration={0.2}
+            transitionKey={peerTyping ? "typing" : "idle"}
+            type="fade"
+          >
+            {peerTyping ? typingLabel : null}
+          </AutoTransition>
+          <textarea
+            aria-label={placeholder}
+            className="h-28 w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 pr-14 text-sm font-medium leading-relaxed tracking-[0.03em] text-sky-50 outline-none transition-colors placeholder:text-sky-100/35 focus:border-sky-100/35 focus:bg-black/30 disabled:cursor-not-allowed disabled:opacity-45"
+            disabled={!ready}
+            maxLength={4_000}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              if (event.target.value) onTyping();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                send();
+              }
+            }}
+            placeholder={placeholder}
+            ref={composerRef}
+            value={draft}
+          />
+          <button
+            aria-label={placeholder}
+            className="absolute bottom-3 right-3 inline-flex size-9 items-center justify-center rounded-xl text-sky-50 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/70 disabled:cursor-not-allowed disabled:opacity-35"
+            disabled={!canSend}
+            style={{ backgroundColor: canSend ? `${accent}80` : "rgb(255 255 255 / 0.08)" }}
+            type="submit"
+          >
+            <RiSendPlane2Fill aria-hidden="true" className="size-4" />
+          </button>
+        </>
+      )}
+      onSubmit={send}
+      scrollKey={messages.length}
+    >
         <div ref={messageListRef} className="flex min-h-full flex-col justify-end pt-8">
           <AnimatePresence initial={false} mode="popLayout">
             {messages.length === 0 ? (
@@ -671,54 +757,7 @@ function ChatWorkspace({
               })}
           </AnimatePresence>
         </div>
-      </OverlayScrollbar>
-      <form
-        className="relative shrink-0 border-t border-white/10 pt-4"
-        onSubmit={(event) => {
-          event.preventDefault();
-          send();
-        }}
-      >
-        <AutoTransition
-          as="span"
-          aria-live="polite"
-          className="absolute -top-5 left-4 text-xs font-medium tracking-[0.04em] text-sky-100/45"
-          duration={0.2}
-          transitionKey={peerTyping ? "typing" : "idle"}
-          type="fade"
-        >
-          {peerTyping ? typingLabel : null}
-        </AutoTransition>
-        <textarea
-          aria-label={placeholder}
-          className="min-h-28 w-full resize-none rounded-2xl border border-white/10 bg-black/25 px-4 py-3 pr-14 text-sm font-medium leading-relaxed tracking-[0.03em] text-sky-50 outline-none transition-colors placeholder:text-sky-100/35 focus:border-sky-100/35 focus:bg-black/30 disabled:cursor-not-allowed disabled:opacity-45"
-          disabled={!ready}
-          maxLength={4_000}
-          onChange={(event) => {
-            setDraft(event.target.value);
-            if (event.target.value) onTyping();
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              send();
-            }
-          }}
-          placeholder={placeholder}
-          ref={composerRef}
-          value={draft}
-        />
-        <button
-          aria-label={placeholder}
-          className="absolute bottom-3 right-3 inline-flex size-9 items-center justify-center rounded-xl text-sky-50 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/70 disabled:cursor-not-allowed disabled:opacity-35"
-          disabled={!canSend}
-          style={{ backgroundColor: canSend ? `${accent}80` : "rgb(255 255 255 / 0.08)" }}
-          type="submit"
-        >
-          <RiSendPlane2Fill aria-hidden="true" className="size-4" />
-        </button>
-      </form>
-    </section>
+    </WorkspaceShell>
   );
 }
 
@@ -745,6 +784,49 @@ function ChatDeliveryStatus({ status }: { status: NonNullable<ChatMessage["deliv
         <Icon aria-hidden="true" className={`size-3.5 ${status === "sending" ? "animate-spin" : ""} ${color}`} />
       </AutoTransition>
     </span>
+  );
+}
+
+function FileWorkspace({ locale, ready }: { locale: RoomLocale; ready: boolean }) {
+  const [isDragging, setIsDragging] = useState(false);
+  const copy = locale === "zh"
+    ? { choose: "拖入、粘贴或选择文件", empty: "选择文件以发送" }
+    : { choose: "Drop, paste, or choose files", empty: "Choose files to send" };
+
+  return (
+    <WorkspaceShell
+      footer={(
+        <button
+          className={`inline-flex h-full w-full shrink-0 flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-4 py-3 text-sm font-semibold tracking-[0.04em] transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${isDragging ? "border-sky-100/70 bg-white/[0.07] text-sky-50" : "border-sky-100/20 bg-black/15 text-sky-100/70 hover:bg-black/25 hover:text-sky-50"}`}
+          disabled={!ready}
+          type="button"
+        >
+          <RiAddLine aria-hidden="true" className="size-5" />
+          <span>{copy.choose}</span>
+        </button>
+      )}
+      onDragEnter={(event) => {
+        if (!event.dataTransfer.types.includes("Files")) return;
+        event.preventDefault();
+        setIsDragging(true);
+      }}
+      onDragLeave={() => setIsDragging(false)}
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        setIsDragging(false);
+      }}
+      scrollKey="file-workspace"
+    >
+      <div className="flex min-h-full flex-col justify-end pt-8">
+        <div className="flex flex-1 flex-col items-center justify-center px-6 pb-8 text-center">
+          <RiFolderTransferLine aria-hidden="true" className="size-10 text-sky-200/55" />
+          <p className="mt-4 max-w-sm text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/50">{copy.empty}</p>
+        </div>
+      </div>
+    </WorkspaceShell>
   );
 }
 
@@ -900,7 +982,7 @@ function RoomWorkspace({
                 const isRunning = runningWorkspaces.includes(activeWorkspace);
 
                 return (
-                  <section className={activeWorkspace === "chat" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
+                  <section className={activeWorkspace === "chat" || activeWorkspace === "files" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
                     {activeWorkspace === "chat" ? (
                       <ChatWorkspace
                         accent={theme.accent}
@@ -914,6 +996,8 @@ function RoomWorkspace({
                         ready={progress.dataChannel.state === "active"}
                         typingLabel={workspace.typing}
                       />
+                    ) : activeWorkspace === "files" ? (
+                      <FileWorkspace locale={locale} ready={progress.dataChannel.state === "active"} />
                     ) : activeWorkspace === "status" ? (
                       <div className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
                         <OverlayScrollbar

@@ -40,6 +40,8 @@ interface DockItemData {
     badge?: number
     /** Semantic color treatment for an item */
     tone?: "default" | "danger"
+    /** Indicates background activity while another workspace is foregrounded. */
+    running?: boolean
 }
 
 interface DockItemProps {
@@ -137,10 +139,10 @@ function DockItem({
                 animate={{
                     backgroundColor: item.tone === "danger"
                         ? "rgba(136, 19, 55, 0.62)"
-                        : item.isActive ? `${activeColor}40` : "rgba(0, 0, 0, 0.25)",
+                        : item.isActive ? `${activeColor}40` : item.running ? "rgba(52, 211, 153, 0.25)" : "rgba(0, 0, 0, 0.25)",
                     borderColor: item.tone === "danger"
                         ? "rgba(244, 63, 94, 0.68)"
-                        : item.isActive ? `${activeColor}40` : "rgba(0, 0, 0, 0)",
+                        : item.isActive ? `${activeColor}40` : item.running ? "rgba(110, 231, 183, 0.24)" : "rgba(0, 0, 0, 0)",
                     boxShadow: "0 0 0 rgba(0, 0, 0, 0)",
                 }}
                 transition={{ duration: 0.2, ease: "easeOut" }}
