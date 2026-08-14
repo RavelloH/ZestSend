@@ -1043,18 +1043,21 @@ export class NativeWebRTCSession {
   }
 
   private async performCreateOffer(): Promise<void> {
-    const peer = this.createPeerConnection();
-    const offerEpoch = this.epoch;
-    this.mediaTransport.prepareOffer(peer);
-    for (const name of DATA_CHANNEL_NAMES) this.attachDataChannel(peer.createDataChannel(name, { ordered: name !== "bulk" }));
-    this.setStep("p2p", { state: "checking", detail: "Creating P2P offer" });
+    let peer: RTCPeerConnection | null = null;
     try {
+      peer = this.createPeerConnection();
+      const offerEpoch = this.epoch;
+      this.mediaTransport.prepareOffer(peer);
+      for (const name of DATA_CHANNEL_NAMES) this.attachDataChannel(peer.createDataChannel(name, { ordered: name !== "bulk" }));
+      this.setStep("p2p", { state: "checking", detail: "Creating P2P offer" });
       const offer = await peer.createOffer();
       if (this.closed || this.suspended || this.peer !== peer || this.epoch !== offerEpoch) return;
       await peer.setLocalDescription(offer);
       if (this.closed || this.suspended || this.peer !== peer || this.epoch !== offerEpoch) return;
       this.sendSignal({ description: offer });
-    } catch { if (!this.closed && this.peer === peer) this.requestPeerRestart(); }
+    } catch {
+      if (!this.closed && !this.suspended && (!peer || this.peer === peer)) this.requestPeerRestart();
+    }
   }
 
   private createPeerConnection(): RTCPeerConnection {
