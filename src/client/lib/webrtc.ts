@@ -930,7 +930,10 @@ export class NativeWebRTCSession {
           || this.peer.connectionState !== "connected"
           || this.openDataChannelCount() !== DATA_CHANNEL_COUNT;
         if (this.peer && peerNeedsReset) this.resetPeerForNegotiation();
-        if (!this.peer && this.readyForPeerConnection && this.initiator) void this.createOffer();
+        if (!this.peer && this.readyForPeerConnection) {
+          if (this.initiator) void this.createOffer();
+          else this.requestPeerRestart();
+        }
       }
       return;
     }
