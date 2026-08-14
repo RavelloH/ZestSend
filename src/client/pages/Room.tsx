@@ -2557,7 +2557,7 @@ function RoomWorkspace({
 
           <main className="relative min-h-0 flex-1">
             <AutoTransition
-              className="absolute inset-0 flex min-h-0 w-full"
+              className="absolute inset-0 flex h-full min-h-0 w-full"
               duration={0.22}
               presenceMode="sync"
               transitionKey={activeWorkspace ?? "ready"}

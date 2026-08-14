@@ -85,7 +85,7 @@ export function OverlayScrollbar({
       className={cn("overflow-y-auto", className)}
       data-overlayscrollbars-initialize=""
     >
-      <div className="min-h-full" ref={viewportRef}>
+      <div className="h-full min-h-full" ref={viewportRef}>
         {children}
       </div>
     </div>
