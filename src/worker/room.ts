@@ -154,6 +154,11 @@ function attachmentFor(socket: WebSocket): SocketAttachment | null {
   }
 }
 
+function socketIsLive(socket: WebSocket): boolean {
+  const readyState = socket.readyState;
+  return readyState === undefined || (readyState !== WebSocket.CLOSING && readyState !== WebSocket.CLOSED);
+}
+
 function signalPayload(value: unknown): value is SignalPayload {
   if (!isRecord(value)) return false;
   if (value.description !== undefined) {
@@ -280,7 +285,7 @@ export class Room extends DurableObject<Env> {
       const attachment = attachmentFor(socket);
       if (!attachment || attachment.phase !== "active" || !attachment.slotId) return;
 
-      const { state, changed } = await this.loadState();
+      const { state, changed } = await this.loadStateAndNotify();
       const slot = state.slots.find((candidate) => candidate.slotId === attachment.slotId);
       // A delayed close from a replaced socket must not evict the new connection.
       if (!slot || slot.connectionId !== attachment.connectionId) return;
@@ -328,7 +333,7 @@ export class Room extends DurableObject<Env> {
         this.sendErrorAndClose(socket, "hello-timeout", "Hello handshake timed out.", 4_017);
       }
 
-      const { state, changed } = await this.loadState();
+      const { state, changed } = await this.loadStateAndNotify();
       const inactive = this.removeInactiveConnections(state, now);
       for (const inactiveConnection of inactive) {
         const { slot, connectionId } = inactiveConnection;
@@ -377,7 +382,7 @@ export class Room extends DurableObject<Env> {
   ): Promise<boolean> {
     let resumeTokenForClient: string | null = null;
     const now = Date.now();
-    const loaded = await this.loadState();
+    const loaded = await this.loadStateAndNotify();
     const state = loaded.state;
     const expired = this.removeExpiredLeases(state, now);
     if (expired.length > 0) {
@@ -524,10 +529,10 @@ export class Room extends DurableObject<Env> {
       this.send(socket, { type: "error", code: "invalid-signal", message: "Invalid signaling payload." });
       return;
     }
-    if (typeof parsed.epoch === "number" && parsed.epoch !== (await this.loadState()).state.epoch) return;
+    if (typeof parsed.epoch === "number" && parsed.epoch !== (await this.loadStateAndNotify()).state.epoch) return;
     if (parsed.peerSessionId !== undefined && parsed.peerSessionId !== sender.peerSessionId) return;
 
-    const state = (await this.loadState()).state;
+    const state = (await this.loadStateAndNotify()).state;
     this.broadcastToActive(state, {
       type: "signal",
       from: sender.slotId,
@@ -542,13 +547,13 @@ export class Room extends DurableObject<Env> {
 
   private async currentSlot(socket: WebSocket, attachment: SocketAttachment): Promise<{ state: RoomState; slot: SlotState } | null> {
     if (!attachment.slotId) return null;
-    const state = (await this.loadState()).state;
+    const state = (await this.loadStateAndNotify()).state;
     const slot = state.slots.find((candidate) => candidate.slotId === attachment.slotId && candidate.connectionId === attachment.connectionId);
     return slot ? { state, slot } : null;
   }
 
   private async leave(socket: WebSocket, attachment: SocketAttachment, slot: SlotState): Promise<void> {
-    const loaded = await this.loadState();
+    const loaded = await this.loadStateAndNotify();
     const state = loaded.state;
     const current = state.slots.find((candidate) => candidate.slotId === slot.slotId && candidate.connectionId === attachment.connectionId);
     if (!current) return;
@@ -573,14 +578,24 @@ export class Room extends DurableObject<Env> {
     }
   }
 
-  private async loadState(): Promise<{ state: RoomState; changed: boolean }> {
+  private async loadStateAndNotify(): Promise<{ state: RoomState; changed: boolean }> {
+    const loaded = await this.loadState();
+    if (loaded.disconnected.length > 0) {
+      this.broadcastReconciledDisconnections(loaded.state, loaded.disconnected);
+      await this.scheduleAlarm();
+    }
+    return loaded;
+  }
+
+  private async loadState(): Promise<{ state: RoomState; changed: boolean; disconnected: InactiveConnection[] }> {
     const stored = await this.ctx.storage.get<unknown>(STORAGE_KEY);
     const state = normalizeState(stored);
     let changed = stored === undefined || JSON.stringify(stored) !== JSON.stringify(state);
+    const disconnected: InactiveConnection[] = [];
     const live = new Map<string, SocketAttachment[]>();
     for (const socket of this.ctx.getWebSockets()) {
       const attachment = attachmentFor(socket);
-      if (attachment?.phase === "active" && attachment.slotId) {
+      if (attachment?.phase === "active" && socketIsLive(socket) && attachment.slotId) {
         const entries = live.get(attachment.slotId) ?? [];
         entries.push(attachment);
         live.set(attachment.slotId, entries);
@@ -619,6 +634,7 @@ export class Room extends DurableObject<Env> {
     for (const slot of state.slots) {
       if (!slot.connectionId || live.has(slot.slotId)) continue;
       const now = Date.now();
+      disconnected.push({ slot: { ...slot }, connectionId: slot.connectionId });
       slot.connectionId = null;
       slot.disconnectedAt ??= now;
       slot.leaseExpiresAt ??= now + DISCONNECTED_LEASE_MS;
@@ -634,7 +650,7 @@ export class Room extends DurableObject<Env> {
       changed = true;
     }
     if (changed) await this.ctx.storage.put(STORAGE_KEY, state);
-    return { state, changed };
+    return { state, changed, disconnected };
   }
 
   private async saveState(state: RoomState, changed: boolean): Promise<void> {
@@ -729,6 +745,19 @@ export class Room extends DurableObject<Env> {
       const attachment = attachmentFor(socket);
       if (!attachment?.slotId || !activeIds.has(`${attachment.slotId}:${attachment.connectionId}`)) continue;
       this.send(socket, payload);
+    }
+  }
+
+  private broadcastReconciledDisconnections(state: RoomState, disconnected: InactiveConnection[]): void {
+    for (const { slot } of disconnected) {
+      this.broadcastToActive(state, {
+        type: "peer-disconnected",
+        epoch: state.epoch,
+        slotId: slot.slotId,
+        peerId: slot.slotId,
+        peerSessionId: slot.peerSessionId,
+        retryAfterMs: DISCONNECTED_LEASE_MS,
+      });
     }
   }
 
