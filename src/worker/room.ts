@@ -47,6 +47,11 @@ type RoomState = {
   slots: SlotState[];
 };
 
+type InactiveConnection = {
+  connectionId: string;
+  slot: SlotState;
+};
+
 type ParsedMessage = {
   type?: string;
   mode?: string;
@@ -282,7 +287,7 @@ export class Room extends DurableObject<Env> {
       slot.disconnectedAt = now;
       slot.leaseExpiresAt = now + DISCONNECTED_LEASE_MS;
       state.epoch += 1;
-      await this.saveState(state, changed);
+      await this.saveState(state, true);
       this.broadcastToActive(state, {
         type: "peer-disconnected",
         epoch: state.epoch,
@@ -319,8 +324,9 @@ export class Room extends DurableObject<Env> {
 
       const { state, changed } = await this.loadState();
       const inactive = this.removeInactiveConnections(state, now);
-      for (const slot of inactive) {
-        const staleSocket = this.socketForSlot({ ...slot, connectionId: slot.connectionId });
+      for (const inactiveConnection of inactive) {
+        const { slot, connectionId } = inactiveConnection;
+        const staleSocket = this.socketForConnection(slot.slotId, connectionId);
         if (staleSocket) {
           this.markClosing(staleSocket);
           try {
@@ -649,12 +655,12 @@ export class Room extends DurableObject<Env> {
     return expired;
   }
 
-  private removeInactiveConnections(state: RoomState, now: number): SlotState[] {
+  private removeInactiveConnections(state: RoomState, now: number): InactiveConnection[] {
     const inactive = state.slots.filter((slot) => {
       return slot.connectionId !== null && now - slot.lastSeenAt > ACTIVE_HEARTBEAT_TIMEOUT_MS;
-    }).map((slot) => ({ ...slot }));
+    }).map((slot) => ({ slot: { ...slot }, connectionId: slot.connectionId as string }));
     if (inactive.length === 0) return [];
-    const inactiveIds = new Set(inactive.map((slot) => slot.slotId));
+    const inactiveIds = new Set(inactive.map(({ slot }) => slot.slotId));
     for (const slot of state.slots) {
       if (!inactiveIds.has(slot.slotId)) continue;
       slot.connectionId = null;
@@ -674,9 +680,14 @@ export class Room extends DurableObject<Env> {
   }
 
   private socketForSlot(slot: SlotState): WebSocket | undefined {
+    if (!slot.connectionId) return undefined;
+    return this.socketForConnection(slot.slotId, slot.connectionId);
+  }
+
+  private socketForConnection(slotId: string, connectionId: string): WebSocket | undefined {
     return this.ctx.getWebSockets().find((socket) => {
       const attachment = attachmentFor(socket);
-      return attachment?.phase === "active" && attachment.slotId === slot.slotId && attachment.connectionId === slot.connectionId;
+      return attachment?.phase === "active" && attachment.slotId === slotId && attachment.connectionId === connectionId;
     });
   }
 
