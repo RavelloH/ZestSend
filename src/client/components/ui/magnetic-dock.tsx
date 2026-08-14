@@ -36,8 +36,6 @@ interface DockItemData {
     onClick?: () => void
     /** Whether item is active */
     isActive?: boolean
-    /** Accent applied while this item is active. */
-    activeColor?: string
     /** Badge count */
     badge?: number
     /** Semantic color treatment for an item */
@@ -141,7 +139,7 @@ function DockItem({
                 animate={{
                     backgroundColor: item.tone === "danger"
                         ? "rgba(136, 19, 55, 0.45)"
-                        : item.isActive ? `${item.activeColor ?? activeColor}33` : item.running ? "rgba(52, 211, 153, 0.25)" : "rgba(0, 0, 0, 0.25)",
+                        : item.running ? "rgba(52, 211, 153, 0.25)" : item.isActive ? `${activeColor}33` : "rgba(0, 0, 0, 0.25)",
                     borderColor: item.tone === "danger"
                         ? "rgba(244, 63, 94, 0.42)"
                         : "rgba(255, 255, 255, 0.1)",

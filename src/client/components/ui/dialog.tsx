@@ -137,7 +137,7 @@ export const DialogContent = forwardRef<HTMLDivElement, DialogContentProps>(
       animate={fadeOnly ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
       className={cn(
         "glass zest-dialog-content flex w-full max-w-3xl flex-col overflow-hidden rounded-2xl text-gray-100",
-        fullScreen && "fixed inset-0 h-dvh max-h-none w-screen max-w-none !rounded-none",
+        fullScreen && "zest-fullscreen-dialog fixed inset-0 max-h-none w-screen max-w-none !rounded-none",
         className,
       )}
       exit={fadeOnly ? { opacity: 0 } : { opacity: 0, scale: 0.98, y: 18 }}

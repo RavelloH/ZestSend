@@ -65,8 +65,10 @@ import { useNavigate } from "@tanstack/react-router";
 import cuid from "cuid";
 import { AnimatePresence, motion } from "framer-motion";
 import { type CSSProperties, type DragEventHandler, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import * as Y from "yjs";
 
 import Layout from "../components/Layout";
+import { CollaborationCanvas } from "../components/collaboration-canvas";
 import { CollaborationWorkspace } from "../components/collaboration-editor";
 import { useTheme } from "../components/theme";
 import { AutoTransition } from "../components/ui/auto-transition";
@@ -2283,6 +2285,7 @@ function FileWorkspace({ accent, files, locale, onAccept, onCancel, onDelete, on
 
 function RoomWorkspace({
   chatMessages,
+  canvasHasContent,
   collaborationProvider,
   collaborationPeerCursor,
   fileTransfers,
@@ -2340,6 +2343,7 @@ function RoomWorkspace({
   videoActive,
 }: {
   chatMessages: ChatMessage[];
+  canvasHasContent: boolean;
   collaborationProvider: P2PCollaborationProvider | null;
   collaborationPeerCursor: boolean;
   fileTransfers: FileTransferSnapshot[];
@@ -2458,7 +2462,6 @@ function RoomWorkspace({
     const Icon = workspaceIcons[workspaceId];
     return {
       badge: workspaceId === "chat" ? unreadChatCount : workspaceId === "files" ? pendingFileRequests : undefined,
-      activeColor: workspaceId === "collaborate" && collaborationPeerCursor ? "#34d399" : undefined,
       icon: <Icon aria-hidden="true" className="size-full" />,
       id: workspaceId,
       isActive: activeWorkspace === workspaceId,
@@ -2471,7 +2474,9 @@ function RoomWorkspace({
             ? activeWorkspace !== "video" && videoActive
             : workspaceId === "watch"
               ? activeWorkspace !== "watch" && sharedPlayback !== null
-              : workspaceId === "collaborate" && activeWorkspace !== "collaborate" && collaborationPeerCursor,
+              : workspaceId === "collaborate"
+                ? collaborationPeerCursor
+                : workspaceId === "canvas" && activeWorkspace !== "canvas" && canvasHasContent,
       onClick: () => activateWorkspace(workspaceId),
     };
   });
@@ -2490,12 +2495,12 @@ function RoomWorkspace({
         fadeOnly
         fullScreen
         aria-labelledby="connection-ready-title"
-        className="backdrop-blur-[10px]"
-        style={{ height: "100dvh", maxHeight: "none", width: "100dvw" }}
+        className="zest-room-dialog backdrop-blur-[10px]"
+        style={{ maxHeight: "none", width: "100dvw" }}
       >
         <motion.div
           animate={{ opacity: isExiting ? 0 : 1 }}
-          className="zest-room-safe relative flex min-h-full flex-1 flex-col p-5 sm:p-8"
+          className="zest-room-safe relative flex h-full min-h-full flex-1 flex-col p-5 sm:p-8"
           transition={{ duration: 0.28, ease: "easeOut" }}
         >
           <header className="flex items-center justify-between gap-4">
@@ -2563,7 +2568,7 @@ function RoomWorkspace({
                 const isRunning = runningWorkspaces.includes(activeWorkspace);
 
                 return (
-                  <section className={activeWorkspace === "chat" || activeWorkspace === "collaborate" || activeWorkspace === "files" || activeWorkspace === "video" || activeWorkspace === "voice" || activeWorkspace === "watch" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
+                  <section className={activeWorkspace === "chat" || activeWorkspace === "collaborate" || activeWorkspace === "canvas" || activeWorkspace === "files" || activeWorkspace === "video" || activeWorkspace === "voice" || activeWorkspace === "watch" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
                     {activeWorkspace === "chat" ? (
                       <ChatWorkspace
                         accent={theme.accent}
@@ -2632,6 +2637,8 @@ function RoomWorkspace({
                       />
                     ) : activeWorkspace === "collaborate" ? (
                       <CollaborationWorkspace accent={theme.accent} locale={locale} provider={collaborationProvider} />
+                    ) : activeWorkspace === "canvas" ? (
+                      <CollaborationCanvas accent={theme.accent} locale={locale} provider={collaborationProvider} />
                     ) : activeWorkspace === "status" ? (
                       <div className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
                         <OverlayScrollbar
@@ -2777,6 +2784,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const [connectionRoute, setConnectionRoute] = useState<ConnectionRoute>("direct");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [fileTransfers, setFileTransfers] = useState<FileTransferSnapshot[]>([]);
+  const [canvasHasContent, setCanvasHasContent] = useState(false);
   const [collaborationProvider, setCollaborationProvider] = useState<P2PCollaborationProvider | null>(null);
   const [collaborationPeerCursor, setCollaborationPeerCursor] = useState(false);
   const [mediaTransport, setMediaTransport] = useState<MediaTransport | null>(null);
@@ -2834,6 +2842,23 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     return () => {
       collaborationProvider.awareness.off("update", refreshPeerCursor);
     };
+  }, [collaborationProvider]);
+
+  useEffect(() => {
+    if (!collaborationProvider) {
+      setCanvasHasContent(false);
+      return;
+    }
+    const strokes = collaborationProvider.document.getArray<Y.Map<unknown>>("zestsend-canvas-strokes");
+    const refreshCanvasContent = () => {
+      const hasContent = strokes.toArray().some((stroke) => (
+        !stroke.get("deleted") && ((stroke.get("points") as Y.Array<number> | undefined)?.length ?? 0) > 0
+      ));
+      setCanvasHasContent((current) => current === hasContent ? current : hasContent);
+    };
+    strokes.observeDeep(refreshCanvasContent);
+    refreshCanvasContent();
+    return () => strokes.unobserveDeep(refreshCanvasContent);
   }, [collaborationProvider]);
   const [progress, setProgress] = useState<ConnectionProgress>({
     websocket: { state: "pending", detail: "Waiting for signaling socket" },
@@ -3674,6 +3699,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         <RoomFullContent locale={locale} onLeave={leave} roomId={roomId} />
       ) : dialogPhase === "ready" || dialogPhase === "closing-for-reconnect" ? (
         <RoomWorkspace
+          canvasHasContent={canvasHasContent}
           chatMessages={chatMessages}
           collaborationProvider={collaborationProvider}
           collaborationPeerCursor={collaborationPeerCursor}

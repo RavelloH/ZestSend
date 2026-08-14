@@ -13,6 +13,6 @@ export default function Layout({ children, title = "ZestSend - P2P文件传输" 
   }, [title]);
 
   return (
-    <main className="box-border h-[100dvh] min-h-[100dvh] overflow-hidden text-slate-100">{children}</main>
+    <main className="zest-viewport box-border overflow-hidden text-slate-100">{children}</main>
   );
 }
