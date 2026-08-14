@@ -2453,14 +2453,25 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     });
     session.attachFileTransferManager(fileManagerRef.current);
     session.connect();
-    const handlePageHide = () => session.suspend();
+    let pageHidden = false;
+    const handlePageHide = () => {
+      pageHidden = true;
+      session.suspend();
+    };
+    const handlePageShow = () => {
+      pageHidden = false;
+      session.resume();
+    };
     window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("pageshow", handlePageShow);
 
     return () => {
       if (peerTypingTimerRef.current !== null) window.clearTimeout(peerTypingTimerRef.current);
       peerTypingTimerRef.current = null;
       window.removeEventListener("pagehide", handlePageHide);
-      session.close();
+      window.removeEventListener("pageshow", handlePageShow);
+      if (pageHidden) session.suspend();
+      else session.close();
       unsubscribeMedia();
       rawMicrophoneTrackRef.current?.stop();
       rawMicrophoneTrackRef.current = null;
