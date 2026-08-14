@@ -195,6 +195,7 @@ export class MediaTransport {
 
     try {
       await slot.sender.replaceTrack(track);
+      if (id === "playback-video" && track) await this.configureSharedPlaybackVideo(slot.sender);
       slot.localTrack = track;
       slot.localState = state;
       this.sendControl({ slot: id, state, type: "media-slot-update" });
@@ -254,6 +255,21 @@ export class MediaTransport {
     if (transceiver.direction !== "stopped") transceiver.direction = "sendrecv";
     slot.transceiver = transceiver;
     slot.sender = transceiver.sender;
+  }
+
+  /** Shared playback preserves source detail instead of inheriting camera-oriented limits. */
+  private async configureSharedPlaybackVideo(sender: RTCRtpSender): Promise<void> {
+    try {
+      const parameters = sender.getParameters();
+      const encoding = parameters.encodings?.[0];
+      if (!encoding) return;
+      encoding.maxBitrate = 12_000_000;
+      encoding.maxFramerate = 60;
+      encoding.scaleResolutionDownBy = 1;
+      await sender.setParameters(parameters);
+    } catch {
+      // Encoder controls are browser-dependent; retaining the source track is preferable to failing playback.
+    }
   }
 
   private assignRemoteTrack(event: RemoteTrackEvent): boolean {

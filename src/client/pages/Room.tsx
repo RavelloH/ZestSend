@@ -12,6 +12,8 @@ import {
   RiErrorWarningLine,
   RiEqualizerLine,
   RiExchange2Line,
+  RiFullscreenExitLine,
+  RiFullscreenLine,
   RiFileEditLine,
   RiFileCodeLine,
   RiFileExcel2Line,
@@ -42,6 +44,7 @@ import {
   RiSignalCellular3Fill,
   RiSendPlane2Fill,
   RiStopLine,
+  RiSpeedLine,
   RiLogoutBoxRLine,
   RiLock2Fill,
   RiLoader4Line,
@@ -70,6 +73,7 @@ import { MagneticDock, type DockItemData } from "../components/ui/magnetic-dock"
 import { OverlayScrollbar } from "../components/ui/overlay-scrollbar";
 import { FileTransferManager, type FileTransferDiagnostics, type FileTransferSnapshot } from "../lib/file-transfer";
 import type { MediaTransport } from "../lib/media-transport";
+import type { SharedPlaybackCommand, SharedPlaybackMessage } from "../lib/shared-playback";
 import {
   NativeWebRTCSession,
   type ConnectionRoute,
@@ -139,6 +143,19 @@ function WorkspaceShell({
       </form>
     </section>
   );
+}
+
+function WorkspaceEmptyState({ icon, message }: { icon: ReactNode; message: string }) {
+  return <motion.div
+    animate={{ opacity: 1 }}
+    className="flex size-full min-h-0 flex-1 flex-col items-center justify-center text-center"
+    exit={{ opacity: 0 }}
+    initial={{ opacity: 0 }}
+    transition={{ duration: 0.2, ease: "easeOut" }}
+  >
+    {icon}
+    <p className="mt-4 max-w-sm text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/50">{message}</p>
+  </motion.div>;
 }
 
 function appendChatMessage(messages: ChatMessage[], message: ChatMessage): ChatMessage[] {
@@ -863,20 +880,10 @@ function ChatWorkspace({
       onSubmit={send}
       scrollKey={messages.length}
     >
-        <div ref={messageListRef} className="flex min-h-full flex-col justify-end pt-8">
+        <div ref={messageListRef} className={`flex min-h-full flex-col ${messages.length === 0 ? "" : "justify-end pt-8"}`}>
           <AnimatePresence initial={false} mode="popLayout">
             {messages.length === 0 ? (
-              <motion.div
-                key="empty-chat"
-                animate={{ opacity: 1, y: 0 }}
-                className="flex flex-1 flex-col items-center justify-center pb-8 text-center"
-                exit={{ opacity: 0, y: -8 }}
-                initial={{ opacity: 0, y: 8 }}
-                transition={{ duration: 0.2, ease: "easeOut" }}
-              >
-                <RiChat3Line aria-hidden="true" className="size-9 text-sky-200/55" />
-                <p className="mt-4 max-w-xs text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/50">{emptyMessage}</p>
-              </motion.div>
+              <WorkspaceEmptyState icon={<RiChat3Line aria-hidden="true" className="size-10 text-sky-200/55" />} key="empty-chat" message={emptyMessage} />
             ) : messages.map((message) => {
                 const isLocal = message.sender === "local";
                 return (
@@ -1050,6 +1057,60 @@ type VideoTile = {
   stream: MediaStream;
 };
 
+type SharedPlayback = {
+  currentTime: number;
+  duration: number;
+  id: string;
+  kind: "audio" | "video";
+  name: string;
+  owner: "local" | "remote";
+  playbackRate: number;
+  playing: boolean;
+};
+
+type CapturableMediaElement = HTMLMediaElement & {
+  captureStream?: () => MediaStream;
+  mozCaptureStream?: () => MediaStream;
+};
+
+function captureMediaStream(element: HTMLMediaElement): MediaStream | null {
+  const capturable = element as CapturableMediaElement;
+  return capturable.captureStream?.() ?? capturable.mozCaptureStream?.() ?? null;
+}
+
+function mediaDuration(element: HTMLMediaElement): number {
+  return Number.isFinite(element.duration) && element.duration > 0 ? element.duration : 0;
+}
+
+function localMediaKind(file: File): "audio" | "video" | null {
+  if (file.type.startsWith("audio/")) return "audio";
+  if (file.type.startsWith("video/")) return "video";
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  if (["mp4", "m4v", "mov", "mkv", "ogv", "webm"].includes(extension ?? "")) return "video";
+  if (["aac", "flac", "m4a", "mp3", "ogg", "opus", "wav", "weba"].includes(extension ?? "")) return "audio";
+  return null;
+}
+
+function waitForMediaMetadata(element: HTMLMediaElement): Promise<void> {
+  if (element.readyState >= HTMLMediaElement.HAVE_METADATA) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onLoaded = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error("The selected media file could not be opened."));
+    };
+    const cleanup = () => {
+      element.removeEventListener("loadedmetadata", onLoaded);
+      element.removeEventListener("error", onError);
+    };
+    element.addEventListener("loadedmetadata", onLoaded, { once: true });
+    element.addEventListener("error", onError, { once: true });
+  });
+}
+
 function VideoStream({ className, muted, stream }: { className?: string; muted?: boolean; stream: MediaStream }) {
   const ref = useRef<HTMLVideoElement>(null);
 
@@ -1074,6 +1135,66 @@ function VideoShell({ children, footer }: { children: ReactNode; footer: ReactNo
   </section>;
 }
 
+function SpeakerVolumeDialog({
+  locale,
+  onOpenChange,
+  onScreenShareVolumeChange,
+  onSharedPlaybackVolumeChange,
+  onVoiceVolumeChange,
+  open,
+  screenShareVolume,
+  sharedPlaybackVolume,
+  voiceVolume,
+}: {
+  locale: RoomLocale;
+  onOpenChange: (open: boolean) => void;
+  onScreenShareVolumeChange: (value: number) => void;
+  onSharedPlaybackVolumeChange: (value: number) => void;
+  onVoiceVolumeChange: (value: number) => void;
+  open: boolean;
+  screenShareVolume: number;
+  sharedPlaybackVolume: number;
+  voiceVolume: number;
+}) {
+  const copy = locale === "zh" ? {
+    screen: "屏幕共享音量",
+    sharedPlayback: "同播共享音量",
+    speaker: "扬声器",
+    voice: "语音通话音量",
+  } : {
+    screen: "Screen-share volume",
+    sharedPlayback: "Shared playback volume",
+    speaker: "Speaker",
+    voice: "Voice call volume",
+  };
+  const controls = [
+    [copy.voice, voiceVolume, onVoiceVolumeChange],
+    [copy.screen, screenShareVolume, onScreenShareVolumeChange],
+    [copy.sharedPlayback, sharedPlaybackVolume, onSharedPlaybackVolumeChange],
+  ] as const;
+
+  return <Dialog open={open} onOpenChange={onOpenChange}>
+    <DialogContent aria-labelledby="speaker-volume-title" className="!max-w-md">
+      <div className="p-6 sm:p-7">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.speaker}</p>
+            <h2 className="mt-2 text-2xl font-bold tracking-[0.04em] text-sky-50" id="speaker-volume-title">{copy.speaker}</h2>
+          </div>
+          <DialogClose aria-label={locale === "zh" ? "关闭" : "Close"} />
+        </div>
+        {controls.map(([label, value, onChange]) => <label className="mt-7 flex items-center gap-4" key={label}>
+          <span className="w-28 shrink-0 text-sm font-semibold text-sky-100/65">{label}</span>
+          <input aria-label={label} className="h-1.5 w-full cursor-pointer accent-sky-300" max="1" min="0" onChange={(event) => onChange(Number(event.target.value))} step="0.01" type="range" value={value} />
+          <NumberFlowGroup>
+            <span className="inline-flex w-10 items-baseline justify-end text-sm font-semibold tabular-nums text-sky-100/70"><NumberFlow value={Math.round(value * 100)} willChange /><span>%</span></span>
+          </NumberFlowGroup>
+        </label>)}
+      </div>
+    </DialogContent>
+  </Dialog>;
+}
+
 function VideoWorkspace({
   accent,
   cameraActive,
@@ -1090,10 +1211,8 @@ function VideoWorkspace({
   screenAudioFallbackOpen,
   onCloseScreenAudioFallback,
   onShareScreenWithoutAudio,
-  screenShareVolume,
-  speakerVolume,
-  onScreenShareVolumeChange,
-  onSpeakerVolumeChange,
+  onOpenSpeakerDialog,
+  speakerActive,
 }: {
   accent: string;
   cameraActive: boolean;
@@ -1110,15 +1229,12 @@ function VideoWorkspace({
   screenAudioFallbackOpen: boolean;
   onCloseScreenAudioFallback: () => void;
   onShareScreenWithoutAudio: () => void;
-  screenShareVolume: number;
-  speakerVolume: number;
-  onScreenShareVolumeChange: (value: number) => void;
-  onSpeakerVolumeChange: (value: number) => void;
+  onOpenSpeakerDialog: () => void;
+  speakerActive: boolean;
 }) {
   const [cameraInputs, setCameraInputs] = useState<MediaDeviceInfo[]>([]);
   const [cameraDialogOpen, setCameraDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
-  const [volumeDialogOpen, setVolumeDialogOpen] = useState(false);
   const [mediaVersion, setMediaVersion] = useState(0);
   const [primaryId, setPrimaryId] = useState<VideoTile["id"] | null>(null);
   const signatureRef = useRef("");
@@ -1134,10 +1250,8 @@ function VideoWorkspace({
     screen: "屏幕共享",
     screenOff: "开始共享",
     screenOn: "停止共享",
-    screenVolume: "屏幕共享音量",
     speaker: "扬声器",
     videoQuality: "目标视频质量",
-    voiceVolume: "语音音量",
     localCamera: "我的视频",
     localScreen: "我的屏幕",
     remoteCamera: "对方视频",
@@ -1156,10 +1270,8 @@ function VideoWorkspace({
     screen: "Screen share",
     screenOff: "Start sharing",
     screenOn: "Stop sharing",
-    screenVolume: "Screen-share volume",
     speaker: "Speaker",
     videoQuality: "Target video quality",
-    voiceVolume: "Voice volume",
     localCamera: "YOUR VIDEO",
     localScreen: "YOUR SCREEN",
     remoteCamera: "THEIR VIDEO",
@@ -1225,13 +1337,11 @@ function VideoWorkspace({
   const primary = tiles.find((tile) => tile.id === primaryId) ?? tiles[0];
   const secondary = tiles.filter((tile) => tile.id !== primary?.id);
   const secondarySpan = secondary.length === 1 ? "col-span-6 mx-auto w-full max-w-md" : secondary.length === 2 ? "col-span-3" : "col-span-2";
-  const speakerActive = speakerVolume > 0 || screenShareVolume > 0;
-
   return <VideoShell
     footer={<div className="flex h-full items-center justify-center gap-7 sm:gap-10">
       {[
         { active: screenShareActive, icon: RiComputerLine, label: screenShareActive ? copy.screenOn : copy.screen, onClick: onToggleScreenShare },
-        { active: speakerActive, icon: RiVolumeUpLine, label: copy.speaker, onClick: () => setVolumeDialogOpen(true) },
+        { active: speakerActive, icon: RiVolumeUpLine, label: copy.speaker, onClick: onOpenSpeakerDialog },
         { active: cameraActive, icon: cameraActive ? RiCameraOffLine : RiCameraLine, label: cameraActive ? copy.cameraOn : copy.cameraOff, onClick: onToggleCamera },
         { active: Boolean(cameraDeviceId), icon: RiCameraSwitchLine, label: copy.chooseCamera, onClick: () => setCameraDialogOpen(true) },
         { active: false, icon: RiSettings3Line, label: copy.quality, onClick: () => setSettingsDialogOpen(true) },
@@ -1249,8 +1359,9 @@ function VideoWorkspace({
       </div>)}
     </div>}
   >
-    <div className="flex h-full min-h-0 items-center justify-center px-2 py-3">
-      {!primary ? <div className="text-center text-sky-100/45"><RiVideoOnLine aria-hidden="true" className="mx-auto size-12" /><p className="mt-4 text-sm font-semibold tracking-[0.05em]">{copy.noVideo}</p></div> : (
+    <div className={`flex h-full min-h-0 items-center justify-center ${primary ? "px-2 py-3" : "px-2 pb-7 pt-4 pr-5"}`}>
+      <AutoTransition className="flex size-full min-h-0 items-center justify-center" duration={0.22} presenceMode="wait" transitionKey={primary ? "active" : "empty"} type="fade">
+        {!primary ? <WorkspaceEmptyState icon={<RiVideoOnLine aria-hidden="true" className="size-10 text-sky-200/55" />} message={copy.noVideo} /> : (
         <motion.div
           className="grid h-full min-h-0 w-full max-w-5xl grid-cols-6 gap-2.5"
           layout
@@ -1273,7 +1384,8 @@ function VideoWorkspace({
             </motion.button>;
           })}
         </motion.div>
-      )}
+        )}
+      </AutoTransition>
     </div>
     <Dialog open={screenAudioFallbackOpen} onOpenChange={(open) => { if (!open) onCloseScreenAudioFallback(); }}>
       <DialogContent aria-labelledby="screen-audio-fallback-title" className="!max-w-md">
@@ -1288,9 +1400,245 @@ function VideoWorkspace({
         </div>
       </DialogContent>
     </Dialog>
-    <Dialog open={volumeDialogOpen} onOpenChange={setVolumeDialogOpen}><DialogContent aria-labelledby="video-volume-title" className="!max-w-md"><div className="p-6 sm:p-7"><div className="flex items-center justify-between gap-4"><div><p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.speaker}</p><h2 className="mt-2 text-2xl font-bold tracking-[0.04em] text-sky-50" id="video-volume-title">{copy.speaker}</h2></div><DialogClose aria-label={locale === "zh" ? "关闭" : "Close"} /></div>{[[copy.voiceVolume, speakerVolume, onSpeakerVolumeChange], [copy.screenVolume, screenShareVolume, onScreenShareVolumeChange]].map(([label, value, change]) => <label className="mt-7 flex items-center gap-4" key={label as string}><span className="w-28 shrink-0 text-sm font-semibold text-sky-100/65">{label as string}</span><input aria-label={label as string} className="h-1.5 w-full cursor-pointer accent-sky-300" max="1" min="0" onChange={(event) => (change as (value: number) => void)(Number(event.target.value))} step="0.01" type="range" value={value as number} /><NumberFlowGroup><span className="inline-flex w-10 items-baseline justify-end text-sm font-semibold tabular-nums text-sky-100/70"><NumberFlow value={Math.round((value as number) * 100)} willChange /><span>%</span></span></NumberFlowGroup></label>)}</div></DialogContent></Dialog>
     <Dialog open={cameraDialogOpen} onOpenChange={setCameraDialogOpen}><DialogContent aria-labelledby="video-camera-title" className="!max-w-md"><div className="p-6 sm:p-7"><div className="flex items-center justify-between gap-4"><div><p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.camera}</p><h2 className="mt-2 text-2xl font-bold tracking-[0.04em] text-sky-50" id="video-camera-title">{copy.chooseCamera}</h2></div><DialogClose aria-label={locale === "zh" ? "关闭" : "Close"} /></div><div className="mt-7 divide-y divide-white/10 border-y border-white/10">{cameraInputs.map((device, index) => <button className="flex w-full items-center justify-between gap-4 py-4 text-left text-sm font-semibold tracking-[0.03em] text-sky-100/75 transition-colors hover:text-sky-50" key={device.deviceId || index} onClick={() => void onSelectCamera(device.deviceId).then(() => setCameraDialogOpen(false))} type="button"><span className="truncate">{device.label || `${copy.camera} ${index + 1}`}</span>{device.deviceId === cameraDeviceId ? <RiCheckLine aria-hidden="true" className="size-5 shrink-0 text-sky-200" /> : null}</button>)}{cameraInputs.length === 0 ? <p className="py-4 text-sm font-medium text-sky-100/50">{locale === "zh" ? "未发现可用摄像头" : "No camera found"}</p> : null}</div></div></DialogContent></Dialog>
     <Dialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen}><DialogContent aria-labelledby="video-settings-title" className="!max-w-md"><div className="p-6 sm:p-7"><div className="flex items-center justify-between gap-4"><div><p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.quality}</p><h2 className="mt-2 text-2xl font-bold tracking-[0.04em] text-sky-50" id="video-settings-title">{copy.videoQuality}</h2></div><DialogClose aria-label={locale === "zh" ? "关闭" : "Close"} /></div><p className="mt-3 text-sm leading-relaxed text-sky-100/55">{copy.qualityDescription}</p><div className="mt-7 grid grid-cols-3 gap-2">{(["low", "balanced", "high"] as VideoQuality[]).map((option) => <Clickable className="glass !h-11 rounded-xl border border-white/10 text-sm font-semibold text-sky-100/75" hoverScale={1.02} key={option} onClick={() => { onUpdateVideoQuality(option); setSettingsDialogOpen(false); }} style={{ backgroundColor: option === quality ? `${accent}33` : "rgb(0 0 0 / 0.25)" }} tapScale={0.97}>{copy[option]}</Clickable>)}</div></div></DialogContent></Dialog>
+  </VideoShell>;
+}
+
+function formatPlaybackTime(value: number): string {
+  const totalSeconds = Math.max(0, Math.floor(value));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor(totalSeconds % 3_600 / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function WatchWorkspace({
+  accent,
+  error,
+  locale,
+  media,
+  onControl,
+  onOpenFile,
+  onOpenSpeakerDialog,
+  playback,
+  ready,
+  speakerActive,
+}: {
+  accent: string;
+  error: string | null;
+  locale: RoomLocale;
+  media: MediaTransport | null;
+  onControl: (command: SharedPlaybackCommand, options?: { currentTime?: number; playbackRate?: number }) => void;
+  onOpenFile: (file: File) => Promise<void>;
+  onOpenSpeakerDialog: () => void;
+  playback: SharedPlayback | null;
+  ready: boolean;
+  speakerActive: boolean;
+}) {
+  const pickerRef = useRef<HTMLInputElement>(null);
+  const localStreamsRef = useRef(new Map<"audio" | "video", MediaStream>());
+  const signatureRef = useRef("");
+  const watchSurfaceRef = useRef<HTMLDivElement>(null);
+  const [mediaVersion, setMediaVersion] = useState(0);
+  const [playbackChromeVisible, setPlaybackChromeVisible] = useState(false);
+  const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const copy = locale === "zh" ? {
+    choose: "选择本地音频或视频",
+    current: "正在同播",
+    empty: "打开一个本地音频或视频，和对方一起看或听。",
+    fullscreen: "全屏",
+    exitFullscreen: "退出全屏",
+    noVideo: "正在播放音频",
+    pause: "暂停",
+    play: "播放",
+    remote: "对方发起",
+    speaker: "扬声器",
+    speed: "播放速度",
+    stop: "结束同播",
+    timeline: "播放进度",
+  } : {
+    choose: "Choose local media",
+    current: "NOW PLAYING",
+    empty: "Open a local audio or video file to watch or listen together.",
+    fullscreen: "Full screen",
+    exitFullscreen: "Exit full screen",
+    noVideo: "Audio is playing",
+    pause: "Pause",
+    play: "Play",
+    remote: "STARTED BY THEM",
+    speaker: "Speaker",
+    speed: "Speed",
+    stop: "End session",
+    timeline: "Playback position",
+  };
+
+  useEffect(() => {
+    if (!media) return;
+    return media.subscribe((slots) => {
+      const signature = slots
+        .filter((slot) => slot.id === "playback-audio" || slot.id === "playback-video")
+        .map((slot) => `${slot.id}:${slot.localState}:${slot.remoteState}:${slot.remoteStream?.id ?? ""}:${media.getLocalTrack(slot.id)?.id ?? ""}`)
+        .join("|");
+      if (signature === signatureRef.current) return;
+      signatureRef.current = signature;
+      setMediaVersion((value) => value + 1);
+    });
+  }, [media]);
+
+  const streams = useMemo(() => {
+    const local = (kind: "audio" | "video", track: MediaStreamTrack | null) => {
+      if (!track) {
+        localStreamsRef.current.delete(kind);
+        return undefined;
+      }
+      const current = localStreamsRef.current.get(kind);
+      if (current?.getTracks()[0] === track) return current;
+      const stream = new MediaStream([track]);
+      localStreamsRef.current.set(kind, stream);
+      return stream;
+    };
+    const localVideo = local("video", media?.getLocalTrack("playback-video") ?? null);
+    const localAudio = local("audio", media?.getLocalTrack("playback-audio") ?? null);
+    return {
+      audio: playback?.owner === "local" ? localAudio : media?.getRemoteStream("playback-audio"),
+      video: playback?.owner === "local" ? localVideo : media?.getRemoteStream("playback-video"),
+    };
+  }, [media, mediaVersion, playback?.owner]);
+
+  const duration = playback?.duration && playback.duration > 0 ? playback.duration : 1;
+  const currentTime = Math.min(playback?.currentTime ?? 0, duration);
+  const chooseFile = () => pickerRef.current?.click();
+  const showPlaybackChrome = playback?.kind !== "video" || playbackChromeVisible;
+  const toggleFullscreen = () => {
+    const surface = watchSurfaceRef.current;
+    if (!surface) return;
+    if (document.fullscreenElement === surface) {
+      void document.exitFullscreen().catch(() => undefined);
+      return;
+    }
+    void surface.requestFullscreen().catch(() => undefined);
+  };
+
+  useEffect(() => {
+    const syncFullscreen = () => setIsFullscreen(document.fullscreenElement === watchSurfaceRef.current);
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreen);
+  }, []);
+
+  useEffect(() => {
+    setPlaybackChromeVisible(false);
+    setSpeedMenuOpen(false);
+  }, [playback?.id]);
+
+  return <VideoShell
+    footer={<div className="flex h-full items-center justify-center gap-7 sm:gap-10">
+      <input
+        accept="audio/*,video/*"
+        className="sr-only"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = "";
+          if (file) void onOpenFile(file);
+        }}
+        ref={pickerRef}
+        type="file"
+      />
+      <div className="flex flex-col items-center gap-2">
+        <Clickable
+          aria-label={copy.speaker}
+          className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200"
+          hoverScale={1.08}
+          onClick={onOpenSpeakerDialog}
+          style={{ backgroundColor: speakerActive ? `${accent}33` : "rgb(0 0 0 / 0.25)" }}
+          tapScale={0.94}
+        >
+          <RiVolumeUpLine aria-hidden="true" className="size-7" />
+        </Clickable>
+        <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.speaker}</span>
+      </div>
+      <div className="flex flex-col items-center gap-2">
+        <Clickable
+          aria-label={playback?.playing ? copy.pause : copy.play}
+          className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200"
+          disabled={!ready || !playback}
+          hoverScale={1.08}
+          onClick={() => onControl(playback?.playing ? "pause" : "play")}
+          style={{ backgroundColor: playback?.playing ? `${accent}33` : "rgb(0 0 0 / 0.25)" }}
+          tapScale={0.94}
+        >
+          {playback?.playing ? <RiPauseLine aria-hidden="true" className="size-7" /> : <RiPlayLine aria-hidden="true" className="ml-0.5 size-7" />}
+        </Clickable>
+        <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{playback?.playing ? copy.pause : copy.play}</span>
+      </div>
+      <div className="flex flex-col items-center gap-2">
+        <Clickable
+          aria-label={copy.stop}
+          className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border text-sky-50 transition-[background-color,border-color,color] duration-200"
+          disabled={!ready || !playback}
+          hoverScale={1.08}
+          onClick={() => onControl("stop")}
+          style={playback ? { backgroundColor: "rgba(136, 19, 55, 0.45)", borderColor: "rgba(244, 63, 94, 0.42)", color: "rgb(255 228 230)" } : { backgroundColor: "rgb(0 0 0 / 0.25)" }}
+          tapScale={0.94}
+        ><RiStopLine aria-hidden="true" className="size-7" /></Clickable>
+        <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.stop}</span>
+      </div>
+    </div>}
+  >
+    <div className="flex h-full min-h-0 items-center justify-center px-2 py-3">
+      <AutoTransition className="flex size-full min-h-0 items-center justify-center" duration={0.22} presenceMode="wait" transitionKey={playback?.id ?? "empty"} type="fade">
+        {!playback ? <div className="flex h-full min-h-0 w-full max-w-5xl">
+        <button
+          className="flex size-full min-h-0 flex-col items-center justify-center rounded-[1.75rem] border-2 border-dashed border-sky-100/20 bg-black/15 px-6 text-center text-sky-100/70 transition-colors hover:border-sky-100/45 hover:bg-black/25 hover:text-sky-50 disabled:cursor-not-allowed disabled:opacity-45"
+          disabled={!ready}
+          onClick={chooseFile}
+          type="button"
+        >
+          <RiPlayCircleLine aria-hidden="true" className="size-12 text-sky-200/55" />
+          <span className="mt-4 text-sm font-semibold tracking-[0.05em] text-sky-100/70">{copy.choose}</span>
+          <span className="mt-2 max-w-md text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/50">{copy.empty}</span>
+        </button>
+      </div> : <div className="flex h-full min-h-0 w-full max-w-5xl flex-col justify-center">
+        <div
+          className="relative min-h-0 flex-1 overflow-hidden rounded-[1.75rem] border border-white/10 bg-black/35 shadow-2xl shadow-black/25"
+          onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setPlaybackChromeVisible(false); }}
+          onFocusCapture={() => setPlaybackChromeVisible(true)}
+          onMouseEnter={() => setPlaybackChromeVisible(true)}
+          onMouseLeave={() => { setPlaybackChromeVisible(false); setSpeedMenuOpen(false); }}
+          ref={watchSurfaceRef}
+        >
+          {playback.kind === "video" && streams.video ? <VideoStream className="block size-full object-contain" muted stream={streams.video} /> : (
+            <div className="flex size-full flex-col items-center justify-center px-6 text-center" style={{ background: `radial-gradient(circle at 50% 38%, ${accent}2d, transparent 45%)` }}>
+              <RiFileMusicLine aria-hidden="true" className="size-14" style={{ color: accent }} />
+              {streams.audio ? <AudioSpectrum accent={accent} active={playback.playing} anchor="bottom" stream={streams.audio} /> : null}
+              <p className="mt-2 text-sm font-bold tracking-[0.08em] text-sky-100/60">{copy.noVideo}</p>
+            </div>
+          )}
+          <div className={`absolute inset-x-0 top-0 flex items-start justify-between gap-3 bg-gradient-to-b from-black/70 to-transparent px-5 py-4 transition-opacity duration-200 ${showPlaybackChrome ? "opacity-100" : "pointer-events-none opacity-0"}`}>
+            <div className="min-w-0"><p className="text-[10px] font-bold tracking-[0.16em] text-sky-100/55">{copy.current}</p><p className="mt-1 truncate text-sm font-bold tracking-[0.04em] text-sky-50 sm:text-base">{playback.name}</p></div>
+            {playback.owner === "remote" ? <span className="shrink-0 rounded-full border border-white/10 bg-black/35 px-2.5 py-1 text-[10px] font-bold tracking-[0.1em] text-sky-100/70">{copy.remote}</span> : null}
+          </div>
+          <div className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/55 to-transparent px-5 pb-4 pt-12 transition-opacity duration-200 ${showPlaybackChrome ? "opacity-100" : "pointer-events-none opacity-0"}`}>
+            <label className="block" aria-label={copy.timeline}>
+              <input aria-label={copy.timeline} className="h-1.5 w-full cursor-pointer accent-sky-200" disabled={!ready} max={duration} min="0" onChange={(event) => onControl("seek", { currentTime: Number(event.target.value) })} step="0.1" type="range" value={currentTime} />
+            </label>
+            <div className="mt-2 flex items-center justify-between font-mono text-xs font-semibold tabular-nums text-sky-100/75"><span>{formatPlaybackTime(currentTime)}</span><span>{formatPlaybackTime(playback.duration)}</span></div>
+            <div className="mt-3 flex items-center justify-end gap-2 border-t border-white/10 pt-3">
+              <div className="relative">
+                <button aria-expanded={speedMenuOpen} aria-haspopup="menu" aria-label={copy.speed} className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-white/10 bg-black/20 px-2.5 text-xs font-bold tabular-nums text-sky-100/80 transition-colors hover:bg-white/10 hover:text-sky-50" onClick={() => setSpeedMenuOpen((current) => !current)} type="button"><RiSpeedLine aria-hidden="true" className="size-4" />{playback.playbackRate}×</button>
+                {speedMenuOpen ? <div aria-label={copy.speed} className="glass absolute bottom-[calc(100%+0.75rem)] right-0 z-10 grid min-w-32 overflow-hidden !rounded-2xl p-2 text-sky-100" role="menu">{[0.75, 1, 1.25, 1.5].map((rate) => <button className="rounded-xl border border-transparent px-3 py-2.5 text-left text-sm font-semibold tabular-nums text-sky-100/75 transition-colors hover:border-white/[0.1] hover:bg-white/[0.05] hover:text-sky-50" key={rate} onClick={() => { onControl("rate", { playbackRate: rate }); setSpeedMenuOpen(false); }} style={{ backgroundColor: playback.playbackRate === rate ? `${accent}33` : undefined }} type="button">{rate}×</button>)}</div> : null}
+              </div>
+              {playback.kind === "video" ? <button aria-label={isFullscreen ? copy.exitFullscreen : copy.fullscreen} className="grid size-9 place-items-center rounded-lg border border-white/10 bg-black/20 text-sky-100/80 transition-colors hover:bg-white/10 hover:text-sky-50" onClick={toggleFullscreen} type="button">{isFullscreen ? <RiFullscreenExitLine aria-hidden="true" className="size-4" /> : <RiFullscreenLine aria-hidden="true" className="size-4" />}</button> : null}
+            </div>
+            {error ? <p className="mt-3 text-center text-xs font-semibold tracking-[0.03em] text-rose-200">{error}</p> : null}
+          </div>
+        </div>
+      </div>}
+      </AutoTransition>
+    </div>
   </VideoShell>;
 }
 
@@ -1305,10 +1653,10 @@ function VoiceWorkspace({
   noiseReductionActive,
   onToggleNoiseReduction,
   onSelectMicrophone,
+  onOpenSpeakerDialog,
   onToggleMicrophone,
   ready,
-  volume,
-  onVolumeChange,
+  speakerActive,
 }: {
   accent: string;
   locale: RoomLocale;
@@ -1320,21 +1668,19 @@ function VoiceWorkspace({
   noiseReductionActive: boolean;
   onToggleNoiseReduction: () => void;
   onSelectMicrophone: (deviceId: string) => Promise<boolean>;
+  onOpenSpeakerDialog: () => void;
   onToggleMicrophone: () => void;
   ready: boolean;
-  volume: number;
-  onVolumeChange: (value: number) => void;
+  speakerActive: boolean;
 }) {
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [deviceDialogOpen, setDeviceDialogOpen] = useState(false);
   const [deviceLoading, setDeviceLoading] = useState(false);
-  const [volumeDialogOpen, setVolumeDialogOpen] = useState(false);
   const [mediaVersion, setMediaVersion] = useState(0);
   const slotSignatureRef = useRef("");
   const remoteStream = media?.getRemoteStream("camera-audio");
   const localTrack = media?.getLocalTrack("camera-audio") ?? null;
   const localStream = useMemo(() => localTrack ? new MediaStream([localTrack]) : undefined, [localTrack]);
-  const speakerActive = volume > 0;
   const copy = locale === "zh"
     ? {
       local: "我",
@@ -1346,7 +1692,6 @@ function VoiceWorkspace({
       remote: "对方",
       speaker: "扬声器",
       voiceChanger: "变声器",
-      volume: "音量",
     }
     : {
       local: "YOU",
@@ -1358,7 +1703,6 @@ function VoiceWorkspace({
       remote: "THEM",
       speaker: "Speaker",
       voiceChanger: "Voice changer",
-      volume: "Volume",
     };
 
   useEffect(() => {
@@ -1417,7 +1761,7 @@ function VoiceWorkspace({
             <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.noiseReduction}</span>
           </div>
           <div className="flex flex-col items-center gap-2">
-            <Clickable aria-label={copy.volume} className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200" hoverScale={1.08} onClick={() => setVolumeDialogOpen(true)} style={{ backgroundColor: speakerActive ? `${accent}33` : "rgb(0 0 0 / 0.25)" }} tapScale={0.94}>
+            <Clickable aria-label={copy.speaker} className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200" hoverScale={1.08} onClick={onOpenSpeakerDialog} style={{ backgroundColor: speakerActive ? `${accent}33` : "rgb(0 0 0 / 0.25)" }} tapScale={0.94}>
               <RiVolumeUpLine aria-hidden="true" className="size-7" />
             </Clickable>
             <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.speaker}</span>
@@ -1480,29 +1824,6 @@ function VoiceWorkspace({
         <AudioSpectrum accent={accent} active={Boolean(remoteStream)} anchor="top" stream={remoteStream} />
         <AudioSpectrum accent={accent} active={microphoneActive} anchor="bottom" stream={localStream} />
       </div>
-      <Dialog open={volumeDialogOpen} onOpenChange={setVolumeDialogOpen}>
-        <DialogContent aria-labelledby="voice-volume-title" className="!max-w-md">
-          <div className="p-6 sm:p-7">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <p className="text-xs font-bold tracking-[0.12em] text-sky-100/50">{copy.speaker}</p>
-                <h2 id="voice-volume-title" className="mt-2 text-2xl font-bold tracking-[0.04em] text-sky-50">{copy.volume}</h2>
-              </div>
-              <DialogClose aria-label={locale === "zh" ? "关闭" : "Close"} />
-            </div>
-            <div className="mt-8 flex items-center gap-4">
-              <RiVolumeUpLine aria-hidden="true" className="size-5 shrink-0 text-sky-100/65" />
-              <input aria-label={copy.volume} className="h-1.5 w-full cursor-pointer accent-sky-300" max="1" min="0" onChange={(event) => onVolumeChange(Number(event.target.value))} step="0.01" type="range" value={volume} />
-              <NumberFlowGroup>
-                <span className="inline-flex w-10 items-baseline justify-end text-right text-sm font-semibold tabular-nums text-sky-100/70">
-                  <NumberFlow value={Math.round(volume * 100)} willChange />
-                  <span>%</span>
-                </span>
-              </NumberFlowGroup>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
       <Dialog open={deviceDialogOpen} onOpenChange={setDeviceDialogOpen}>
         <DialogContent aria-labelledby="voice-device-title" className="!max-w-md">
           <div className="p-6 sm:p-7">
@@ -1704,7 +2025,7 @@ function FileWorkspace({ accent, files, locale, onAccept, onCancel, onDelete, on
       scrollKey={files.map((file) => `${file.id}-${file.state}-${file.transferredBytes}`).join("|")}
     >
       <input className="sr-only" multiple onChange={(event) => { if (event.target.files?.length) onOffer(event.target.files); event.target.value = ""; }} ref={pickerRef} type="file" />
-      {files.length === 0 ? <div className="flex min-h-full flex-col items-center justify-center px-6 pb-8 text-center"><RiFolderTransferLine aria-hidden="true" className="size-10 text-sky-200/55" /><p className="mt-4 max-w-sm text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/50">{copy.empty}</p></div> : <div className="space-y-3 pt-4"><AnimatePresence initial={false}>{files.map((file) => {
+      {files.length === 0 ? <WorkspaceEmptyState icon={<RiFolderTransferLine aria-hidden="true" className="size-10 text-sky-200/55" />} message={copy.empty} /> : <div className="space-y-3 pt-4"><AnimatePresence initial={false}>{files.map((file) => {
         const progress = file.size ? Math.min(100, file.transferredBytes / file.size * 100) : file.state === "complete" ? 100 : 0;
         const confirmed = file.size ? Math.min(100, file.confirmedBytes / file.size * 100) : file.state === "complete" ? 100 : 0;
         const Icon = fileIcon(file.name);
@@ -1792,6 +2113,10 @@ function RoomWorkspace({
   microphoneError,
   microphonePending,
   media,
+  sharedPlayback,
+  sharedPlaybackError,
+  onOpenSharedPlayback,
+  onSharedPlaybackControl,
   noiseReductionActive,
   onToggleNoiseReduction,
   onSelectMicrophone,
@@ -1809,6 +2134,8 @@ function RoomWorkspace({
   onShareScreenWithoutAudio,
   screenShareVolume,
   onScreenShareVolumeChange,
+  sharedPlaybackVolume,
+  onSharedPlaybackVolumeChange,
   videoQuality,
   volume,
   onVolumeChange,
@@ -1841,6 +2168,10 @@ function RoomWorkspace({
   microphoneError: string | null;
   microphonePending: boolean;
   media: MediaTransport | null;
+  sharedPlayback: SharedPlayback | null;
+  sharedPlaybackError: string | null;
+  onOpenSharedPlayback: (file: File) => Promise<void>;
+  onSharedPlaybackControl: (command: SharedPlaybackCommand, options?: { currentTime?: number; playbackRate?: number }) => void;
   noiseReductionActive: boolean;
   onToggleNoiseReduction: () => void;
   onSelectMicrophone: (deviceId: string) => Promise<boolean>;
@@ -1858,6 +2189,8 @@ function RoomWorkspace({
   onShareScreenWithoutAudio: () => void;
   screenShareVolume: number;
   onScreenShareVolumeChange: (value: number) => void;
+  sharedPlaybackVolume: number;
+  onSharedPlaybackVolumeChange: (value: number) => void;
   videoQuality: VideoQuality;
   volume: number;
   onVolumeChange: (value: number) => void;
@@ -1876,6 +2209,7 @@ function RoomWorkspace({
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId | null>(() => workspaceFromHash());
   const [unreadChatCount, setUnreadChatCount] = useState(0);
   const [isExitDialogOpen, setExitDialogOpen] = useState(false);
+  const [isSpeakerDialogOpen, setSpeakerDialogOpen] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
   const [showConnectionRates, setShowConnectionRates] = useState(false);
   const exitTimerRef = useRef<number | null>(null);
@@ -1924,6 +2258,7 @@ function RoomWorkspace({
 
   const fileRunning = fileTransfers.some((file) => file.state === "transferring");
   const pendingFileRequests = fileTransfers.filter((file) => file.direction === "incoming" && file.state === "offered").length;
+  const speakerActive = volume > 0 || screenShareVolume > 0 || sharedPlaybackVolume > 0;
 
   const dockItems: DockItemData[] = workspaceOrder.map((workspaceId) => {
     const Icon = workspaceIcons[workspaceId];
@@ -1937,7 +2272,9 @@ function RoomWorkspace({
         ? activeWorkspace !== "files" && fileRunning
         : workspaceId === "voice"
           ? activeWorkspace !== "voice" && voiceActive
-          : workspaceId === "video" && activeWorkspace !== "video" && videoActive,
+          : workspaceId === "video"
+            ? activeWorkspace !== "video" && videoActive
+            : workspaceId === "watch" && activeWorkspace !== "watch" && sharedPlayback !== null,
       onClick: () => activateWorkspace(workspaceId),
     };
   });
@@ -2029,7 +2366,7 @@ function RoomWorkspace({
                 const isRunning = runningWorkspaces.includes(activeWorkspace);
 
                 return (
-                  <section className={activeWorkspace === "chat" || activeWorkspace === "files" || activeWorkspace === "video" || activeWorkspace === "voice" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
+                  <section className={activeWorkspace === "chat" || activeWorkspace === "files" || activeWorkspace === "video" || activeWorkspace === "voice" || activeWorkspace === "watch" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
                     {activeWorkspace === "chat" ? (
                       <ChatWorkspace
                         accent={theme.accent}
@@ -2045,6 +2382,19 @@ function RoomWorkspace({
                       />
                     ) : activeWorkspace === "files" ? (
                       <FileWorkspace accent={theme.accent} files={fileTransfers} locale={locale} onAccept={onAcceptFile} onCancel={onCancelFile} onDelete={onDeleteFile} onDiagnostics={onFileDiagnostics} onDownload={onDownloadFile} onOffer={onOfferFiles} onPause={onPauseFile} onResend={onResendFile} ready={progress.dataChannel.state === "active"} />
+                    ) : activeWorkspace === "watch" ? (
+                      <WatchWorkspace
+                        accent={theme.accent}
+                        error={sharedPlaybackError}
+                        locale={locale}
+                        media={media}
+                        onControl={onSharedPlaybackControl}
+                        onOpenFile={onOpenSharedPlayback}
+                        onOpenSpeakerDialog={() => setSpeakerDialogOpen(true)}
+                        playback={sharedPlayback}
+                        ready={progress.dataChannel.state === "active"}
+                        speakerActive={speakerActive}
+                      />
                     ) : activeWorkspace === "voice" ? (
                       <VoiceWorkspace
                         accent={theme.accent}
@@ -2057,10 +2407,10 @@ function RoomWorkspace({
                         noiseReductionActive={noiseReductionActive}
                         onToggleNoiseReduction={onToggleNoiseReduction}
                         onSelectMicrophone={onSelectMicrophone}
+                        onOpenSpeakerDialog={() => setSpeakerDialogOpen(true)}
                         onToggleMicrophone={onToggleMicrophone}
                         ready={progress.dataChannel.state === "active"}
-                        volume={volume}
-                        onVolumeChange={onVolumeChange}
+                        speakerActive={speakerActive}
                       />
                     ) : activeWorkspace === "video" ? (
                       <VideoWorkspace
@@ -2069,9 +2419,8 @@ function RoomWorkspace({
                         cameraDeviceId={cameraDeviceId}
                         locale={locale}
                         media={media}
-                        onScreenShareVolumeChange={onScreenShareVolumeChange}
                         onSelectCamera={onSelectCamera}
-                        onSpeakerVolumeChange={onVolumeChange}
+                        onOpenSpeakerDialog={() => setSpeakerDialogOpen(true)}
                         onToggleCamera={onToggleCamera}
                         onToggleScreenShare={onToggleScreenShare}
                         onUpdateVideoQuality={onUpdateVideoQuality}
@@ -2081,8 +2430,7 @@ function RoomWorkspace({
                         screenAudioFallbackOpen={screenAudioFallbackOpen}
                         onCloseScreenAudioFallback={onCloseScreenAudioFallback}
                         onShareScreenWithoutAudio={onShareScreenWithoutAudio}
-                        screenShareVolume={screenShareVolume}
-                        speakerVolume={volume}
+                        speakerActive={speakerActive}
                       />
                     ) : activeWorkspace === "status" ? (
                       <div className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
@@ -2172,6 +2520,17 @@ function RoomWorkspace({
               </div>
             </DialogContent>
           </Dialog>
+          <SpeakerVolumeDialog
+            locale={locale}
+            onOpenChange={setSpeakerDialogOpen}
+            onScreenShareVolumeChange={onScreenShareVolumeChange}
+            onSharedPlaybackVolumeChange={onSharedPlaybackVolumeChange}
+            onVoiceVolumeChange={onVolumeChange}
+            open={isSpeakerDialogOpen}
+            screenShareVolume={screenShareVolume}
+            sharedPlaybackVolume={sharedPlaybackVolume}
+            voiceVolume={volume}
+          />
         </motion.div>
       </DialogContent>
     </Dialog>
@@ -2228,9 +2587,12 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const [cameraPending, setCameraPending] = useState(false);
   const [screenShareActive, setScreenShareActive] = useState(false);
   const [screenShareVolume, setScreenShareVolume] = useState(1);
+  const [sharedPlaybackVolume, setSharedPlaybackVolume] = useState(1);
   const [screenAudioFallbackOpen, setScreenAudioFallbackOpen] = useState(false);
   const [videoQuality, setVideoQuality] = useState<VideoQuality>("balanced");
   const [peerTyping, setPeerTyping] = useState(false);
+  const [sharedPlayback, setSharedPlayback] = useState<SharedPlayback | null>(null);
+  const [sharedPlaybackError, setSharedPlaybackError] = useState<string | null>(null);
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const fileTransfersRef = useRef<FileTransferSnapshot[]>([]);
   const fileTransferRefreshTimerRef = useRef<number | null>(null);
@@ -2239,6 +2601,12 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const rawMicrophoneTrackRef = useRef<MediaStreamTrack | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const remoteScreenAudioRef = useRef<HTMLAudioElement>(null);
+  const remotePlaybackAudioRef = useRef<HTMLAudioElement>(null);
+  const sharedPlaybackElementRef = useRef<HTMLVideoElement>(null);
+  const sharedPlaybackRef = useRef<SharedPlayback | null>(null);
+  const sharedPlaybackObjectUrlRef = useRef<string | null>(null);
+  const sharedPlaybackTransitionRef = useRef(false);
+  const sharedPlaybackLastSyncRef = useRef(0);
   const cameraTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenVideoTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenAudioTrackRef = useRef<MediaStreamTrack | null>(null);
@@ -2304,12 +2672,215 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     });
   };
 
+  const updateSharedPlayback = (next: SharedPlayback | null) => {
+    sharedPlaybackRef.current = next;
+    setSharedPlayback(next);
+  };
+
+  const publishSharedPlaybackState = (force = false) => {
+    const playback = sharedPlaybackRef.current;
+    const element = sharedPlaybackElementRef.current;
+    if (!playback || playback.owner !== "local" || !element || sharedPlaybackTransitionRef.current) return;
+
+    const now = performance.now();
+    if (!force && now - sharedPlaybackLastSyncRef.current < 750) return;
+    sharedPlaybackLastSyncRef.current = now;
+    const next: SharedPlayback = {
+      ...playback,
+      currentTime: Number.isFinite(element.currentTime) ? Math.max(0, element.currentTime) : 0,
+      duration: mediaDuration(element),
+      playbackRate: element.playbackRate,
+      playing: !element.paused && !element.ended,
+    };
+    updateSharedPlayback(next);
+    sessionRef.current?.sendControlMessage({
+      currentTime: next.currentTime,
+      duration: next.duration,
+      id: next.id,
+      kind: next.kind,
+      name: next.name,
+      playbackRate: next.playbackRate,
+      playing: next.playing,
+      type: "shared-playback-state",
+    });
+  };
+
+  const clearLocalSharedPlayback = async (announce = true) => {
+    const playback = sharedPlaybackRef.current;
+    if (!playback || playback.owner !== "local") return;
+    const element = sharedPlaybackElementRef.current;
+    const media = sessionRef.current?.media;
+    const audioTrack = media?.getLocalTrack("playback-audio") ?? null;
+    const videoTrack = media?.getLocalTrack("playback-video") ?? null;
+    sharedPlaybackTransitionRef.current = true;
+
+    if (announce) sessionRef.current?.sendControlMessage({ id: playback.id, type: "shared-playback-stopped" });
+    updateSharedPlayback(null);
+    setSharedPlaybackError(null);
+    if (element) {
+      element.pause();
+      element.removeAttribute("src");
+      element.load();
+    }
+    await Promise.all([
+      media?.replaceLocalTrack("playback-audio", null, "ended"),
+      media?.replaceLocalTrack("playback-video", null, "ended"),
+    ]);
+    audioTrack?.stop();
+    videoTrack?.stop();
+    if (sharedPlaybackObjectUrlRef.current) URL.revokeObjectURL(sharedPlaybackObjectUrlRef.current);
+    sharedPlaybackObjectUrlRef.current = null;
+    sharedPlaybackLastSyncRef.current = 0;
+    sharedPlaybackTransitionRef.current = false;
+  };
+
+  const applyLocalSharedPlaybackCommand = async (command: SharedPlaybackCommand, options?: { currentTime?: number; playbackRate?: number }) => {
+    const playback = sharedPlaybackRef.current;
+    const element = sharedPlaybackElementRef.current;
+    if (!playback || playback.owner !== "local" || !element) return;
+    if (command === "stop") {
+      await clearLocalSharedPlayback();
+      return;
+    }
+    if (command === "seek" && typeof options?.currentTime === "number") {
+      element.currentTime = Math.min(Math.max(0, options.currentTime), mediaDuration(element) || options.currentTime);
+      publishSharedPlaybackState(true);
+      return;
+    }
+    if (command === "rate" && typeof options?.playbackRate === "number") {
+      element.playbackRate = options.playbackRate;
+      publishSharedPlaybackState(true);
+      return;
+    }
+    if (command === "pause") {
+      element.pause();
+      publishSharedPlaybackState(true);
+      return;
+    }
+    if (command === "play") {
+      try {
+        await element.play();
+        publishSharedPlaybackState(true);
+      } catch (cause) {
+        setSharedPlaybackError(cause instanceof Error ? cause.message : locale === "zh" ? "无法播放所选媒体。" : "The selected media could not be played.");
+      }
+    }
+  };
+
+  const openSharedPlayback = async (file: File): Promise<void> => {
+    const media = sessionRef.current?.media;
+    const element = sharedPlaybackElementRef.current;
+    const initialKind = localMediaKind(file);
+    if (!media || !element) return;
+    if (!initialKind) {
+      setSharedPlaybackError(locale === "zh" ? "请选择音频或视频文件。" : "Choose an audio or video file.");
+      return;
+    }
+    if (sharedPlaybackRef.current?.owner === "remote") {
+      setSharedPlaybackError(locale === "zh" ? "对方正在同播。请先结束当前同播后再打开你的媒体。" : "The other participant is sharing media. End the current session before opening yours.");
+      return;
+    }
+
+    if (sharedPlaybackRef.current?.owner === "local") await clearLocalSharedPlayback();
+    sharedPlaybackTransitionRef.current = true;
+    setSharedPlaybackError(null);
+    const id = cuid();
+    const sourceUrl = URL.createObjectURL(file);
+    sharedPlaybackObjectUrlRef.current = sourceUrl;
+    updateSharedPlayback({ currentTime: 0, duration: 0, id, kind: initialKind, name: file.name, owner: "local", playbackRate: 1, playing: false });
+
+    try {
+      element.pause();
+      element.src = sourceUrl;
+      element.load();
+      await waitForMediaMetadata(element);
+      await element.play();
+      const stream = captureMediaStream(element);
+      if (!stream) throw new Error(locale === "zh" ? "当前浏览器不支持捕获本地媒体播放流。" : "This browser cannot capture local media playback.");
+      const audioTrack = stream.getAudioTracks()[0] ?? null;
+      const videoTrack = stream.getVideoTracks()[0] ?? null;
+      if (!audioTrack && !videoTrack) throw new Error(locale === "zh" ? "无法从所选媒体中读取可共享的音视频轨道。" : "No shareable audio or video track was found in this media.");
+      if (videoTrack) videoTrack.contentHint = "detail";
+      const [audioAttached, videoAttached] = await Promise.all([
+        media.replaceLocalTrack("playback-audio", audioTrack, audioTrack ? "live" : "idle"),
+        media.replaceLocalTrack("playback-video", videoTrack, videoTrack ? "live" : "idle"),
+      ]);
+      if ((audioTrack && !audioAttached) || (videoTrack && !videoAttached)) throw new Error(locale === "zh" ? "无法将媒体添加到端对端连接。" : "The media could not be added to the peer-to-peer connection.");
+      const current = sharedPlaybackRef.current;
+      if (current?.id === id) updateSharedPlayback({
+        ...current,
+        duration: mediaDuration(element),
+        kind: videoTrack ? "video" : "audio",
+        playing: true,
+      });
+      sharedPlaybackTransitionRef.current = false;
+      publishSharedPlaybackState(true);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : locale === "zh" ? "无法打开所选媒体。" : "The selected media could not be opened.";
+      setSharedPlaybackError(message);
+      sharedPlaybackTransitionRef.current = false;
+      await clearLocalSharedPlayback(false);
+    }
+  };
+
+  const controlSharedPlayback = (command: SharedPlaybackCommand, options?: { currentTime?: number; playbackRate?: number }) => {
+    const playback = sharedPlaybackRef.current;
+    if (!playback) return;
+    if (playback.owner === "local") {
+      void applyLocalSharedPlaybackCommand(command, options);
+      return;
+    }
+    sessionRef.current?.sendControlMessage({
+      command,
+      currentTime: options?.currentTime,
+      id: playback.id,
+      playbackRate: options?.playbackRate,
+      type: "shared-playback-command",
+    });
+  };
+
+  const handleSharedPlaybackMessage = (message: SharedPlaybackMessage) => {
+    if (message.type === "shared-playback-state") {
+      const current = sharedPlaybackRef.current;
+      if (current?.owner === "local") return;
+      updateSharedPlayback({ ...message, owner: "remote" });
+      setSharedPlaybackError(null);
+      return;
+    }
+    if (message.type === "shared-playback-stopped") {
+      const current = sharedPlaybackRef.current;
+      if (current?.owner === "remote" && current.id === message.id) updateSharedPlayback(null);
+      return;
+    }
+    const current = sharedPlaybackRef.current;
+    if (current?.owner === "local" && current.id === message.id) void applyLocalSharedPlaybackCommand(message.command, message);
+  };
+
+  useEffect(() => {
+    const element = sharedPlaybackElementRef.current;
+    if (!element) return;
+    const publish = (event: Event) => publishSharedPlaybackState(event.type !== "timeupdate");
+    const onEnded = () => { void clearLocalSharedPlayback(); };
+    for (const event of ["play", "pause", "ratechange", "seeked", "timeupdate"]) element.addEventListener(event, publish);
+    element.addEventListener("ended", onEnded);
+    return () => {
+      for (const event of ["play", "pause", "ratechange", "seeked", "timeupdate"]) element.removeEventListener(event, publish);
+      element.removeEventListener("ended", onEnded);
+      sharedPlaybackTransitionRef.current = true;
+      element.pause();
+      element.removeAttribute("src");
+      element.load();
+      if (sharedPlaybackObjectUrlRef.current) URL.revokeObjectURL(sharedPlaybackObjectUrlRef.current);
+      sharedPlaybackObjectUrlRef.current = null;
+    };
+  }, [roomId]);
+
   useEffect(() => () => {
     if (reconnectDialogTimerRef.current !== null) window.clearTimeout(reconnectDialogTimerRef.current);
   }, []);
 
   const resumeRemoteAudio = () => {
-    for (const audio of [remoteAudioRef.current, remoteScreenAudioRef.current]) {
+    for (const audio of [remoteAudioRef.current, remoteScreenAudioRef.current, remotePlaybackAudioRef.current]) {
       if (audio) void audio.play().catch(() => undefined);
     }
   };
@@ -2335,6 +2906,22 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     if (audio.srcObject !== remoteStream) audio.srcObject = remoteStream ?? null;
     void audio.play().catch(() => undefined);
   }, [mediaTransport, remoteAudioVersion, screenShareVolume]);
+
+  useEffect(() => {
+    const audio = remotePlaybackAudioRef.current;
+    const remoteStream = mediaTransport?.getRemoteStream("playback-audio");
+    if (!audio) return;
+    audio.autoplay = true;
+    audio.muted = false;
+    audio.volume = sharedPlaybackVolume;
+    if (audio.srcObject !== remoteStream) audio.srcObject = remoteStream ?? null;
+    void audio.play().catch(() => undefined);
+  }, [mediaTransport, remoteAudioVersion, sharedPlaybackVolume]);
+
+  useEffect(() => {
+    const element = sharedPlaybackElementRef.current;
+    if (element) element.volume = sharedPlaybackVolume;
+  }, [sharedPlaybackVolume]);
 
   useEffect(() => {
     const session = new NativeWebRTCSession(
@@ -2371,6 +2958,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         fileTransfersRef.current = [];
         setFileTransfers([]);
         void fileManagerRef.current?.clearSession();
+        void clearLocalSharedPlayback(false);
+        if (sharedPlaybackRef.current?.owner === "remote") updateSharedPlayback(null);
         rawMicrophoneTrackRef.current = null;
         cameraTrackRef.current = null;
         screenVideoTrackRef.current = null;
@@ -2416,6 +3005,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
           setPeerTyping(false);
         }, 3_000);
       },
+      handleSharedPlaybackMessage,
     );
     sessionRef.current = session;
     setMediaTransport(session.media);
@@ -2459,8 +3049,11 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       setCameraPending(false);
       setScreenShareActive(false);
       setScreenShareVolume(1);
+      setSharedPlaybackVolume(1);
       setScreenAudioFallbackOpen(false);
       setVideoQuality("balanced");
+      updateSharedPlayback(null);
+      setSharedPlaybackError(null);
     };
   }, [roomId]);
 
@@ -2816,6 +3409,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       <div className="contents" onClickCapture={resumeRemoteAudio}>
       <audio className="sr-only" autoPlay playsInline ref={remoteAudioRef} />
       <audio className="sr-only" autoPlay playsInline ref={remoteScreenAudioRef} />
+      <audio className="sr-only" autoPlay playsInline ref={remotePlaybackAudioRef} />
+      <video aria-hidden="true" className="sr-only" playsInline ref={sharedPlaybackElementRef} />
       {dialogPhase === "full" ? (
         <RoomFullContent locale={locale} onLeave={leave} roomId={roomId} />
       ) : dialogPhase === "ready" || dialogPhase === "closing-for-reconnect" ? (
@@ -2834,6 +3429,10 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
           onPauseFile={pauseFile}
           onResendFile={resendFile}
           media={mediaTransport}
+          sharedPlayback={sharedPlayback}
+          sharedPlaybackError={sharedPlaybackError}
+          onOpenSharedPlayback={openSharedPlayback}
+          onSharedPlaybackControl={controlSharedPlayback}
           microphoneActive={microphoneActive}
           microphoneDeviceId={microphoneDeviceId}
           microphoneError={microphoneError}
@@ -2859,6 +3458,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
           onShareScreenWithoutAudio={shareScreenWithoutAudio}
           screenShareVolume={screenShareVolume}
           onScreenShareVolumeChange={setScreenShareVolume}
+          sharedPlaybackVolume={sharedPlaybackVolume}
+          onSharedPlaybackVolumeChange={setSharedPlaybackVolume}
           videoQuality={videoQuality}
           open={dialogPhase === "ready"}
           peerTyping={peerTyping}

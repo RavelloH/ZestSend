@@ -43,6 +43,7 @@ export type WebRTCTransportDiagnostics = {
 
 import type { FileTransferManager, FileTransferSnapshot } from "./file-transfer";
 import { MediaTransport, type MediaSlotControlMessage } from "./media-transport";
+import { isSharedPlaybackMessage, type SharedPlaybackMessage } from "./shared-playback";
 
 type SignalMessage = {
   payload?: {
@@ -68,7 +69,7 @@ type ChatTypingMessage = {
   type: "chat-typing";
 };
 
-type DataChannelControlMessage = DataChannelPingMessage | ChatReceiptMessage | ChatTypingMessage | MediaSlotControlMessage;
+type DataChannelControlMessage = DataChannelPingMessage | ChatReceiptMessage | ChatTypingMessage | MediaSlotControlMessage | SharedPlaybackMessage;
 
 export type InteractiveMessage = {
   id: string;
@@ -515,6 +516,7 @@ export class NativeWebRTCSession {
     private readonly onInteractiveMessage: (message: InteractiveMessage) => void,
     private readonly onChatReceipt: (id: string, status: ChatReceiptStatus) => void,
     private readonly onChatTyping: () => void,
+    private readonly onSharedPlaybackMessage: (message: SharedPlaybackMessage) => void,
   ) {
     this.mediaTransport = new MediaTransport(
       (message) => this.sendControlMessage(message),
@@ -937,6 +939,11 @@ export class NativeWebRTCSession {
 
     this.fileTransferManager?.handleControl(message as unknown as { type: string; [key: string]: unknown });
     if (this.mediaTransport.handleControlMessage(message)) return;
+
+    if (isSharedPlaybackMessage(message)) {
+      this.onSharedPlaybackMessage(message);
+      return;
+    }
 
     if (message.type === "chat-received" || message.type === "chat-read") {
       if (typeof message.id === "string" && message.id.length > 0 && message.id.length <= 128) {
