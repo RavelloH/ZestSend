@@ -283,6 +283,9 @@ export class Room extends DurableObject<Env> {
       if (!slot || slot.connectionId !== attachment.connectionId) return;
 
       const now = Date.now();
+      // Prevent a still-visible closing socket from being reconciled back into
+      // the slot while the lease update is being persisted.
+      this.markClosing(socket);
       slot.connectionId = null;
       slot.disconnectedAt = now;
       slot.leaseExpiresAt = now + DISCONNECTED_LEASE_MS;
