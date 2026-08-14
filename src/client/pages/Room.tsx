@@ -77,6 +77,7 @@ import { Dialog, DialogClose, DialogContent } from "../components/ui/dialog";
 import { MagneticDock, type DockItemData } from "../components/ui/magnetic-dock";
 import { OverlayScrollbar } from "../components/ui/overlay-scrollbar";
 import { FileTransferManager, type FileTransferDiagnostics, type FileTransferSnapshot } from "../lib/file-transfer";
+import { trackInsightEvent } from "../lib/insightflare";
 import type { MediaTransport } from "../lib/media-transport";
 import { P2PCollaborationProvider } from "../lib/p2p-collaboration";
 import type { SharedPlaybackCommand, SharedPlaybackMessage } from "../lib/shared-playback";
@@ -177,6 +178,14 @@ const ignoreDialogOpenChange = () => undefined;
 
 type RoomLocale = "en" | "zh";
 type WorkspaceId = "chat" | "files" | "video" | "voice" | "watch" | "collaborate" | "canvas" | "status";
+type MeasuredFeature = "camera" | "canvas" | "chat" | "collaborate" | "files" | "screen_share" | "shared_playback" | "voice";
+
+function fileSizeBucket(size: number) {
+  if (size < 10 * 1024 * 1024) return "under_10mb";
+  if (size < 100 * 1024 * 1024) return "10mb_to_100mb";
+  if (size < 1024 * 1024 * 1024) return "100mb_to_1gb";
+  return "over_1gb";
+}
 
 const roomCopy = {
   en: {
@@ -2291,6 +2300,7 @@ function RoomWorkspace({
   fileTransfers,
   locale,
   onExitComplete,
+  onFeatureUsed,
   onLeave,
   onMarkChatMessageRead,
   onChatTyping,
@@ -2349,6 +2359,7 @@ function RoomWorkspace({
   fileTransfers: FileTransferSnapshot[];
   locale: RoomLocale;
   onExitComplete?: () => void;
+  onFeatureUsed: (feature: MeasuredFeature) => void;
   onLeave: () => void;
   onMarkChatMessageRead: (id: string) => boolean;
   onChatTyping: () => void;
@@ -2447,6 +2458,7 @@ function RoomWorkspace({
   const [runningWorkspaces, setRunningWorkspaces] = useState<WorkspaceId[]>([]);
 
   const activateWorkspace = (workspaceId: WorkspaceId) => {
+    if (activeWorkspace !== workspaceId) trackInsightEvent("workspace_opened", { workspace: workspaceId });
     setActiveWorkspace(workspaceId);
     if (workspaceId === "chat") setUnreadChatCount(0);
     const hash = `#${workspaceId}`;
@@ -2636,9 +2648,9 @@ function RoomWorkspace({
                         speakerActive={speakerActive}
                       />
                     ) : activeWorkspace === "collaborate" ? (
-                      <CollaborationWorkspace accent={theme.accent} locale={locale} provider={collaborationProvider} />
+                      <CollaborationWorkspace accent={theme.accent} locale={locale} onFeatureUsed={() => onFeatureUsed("collaborate")} provider={collaborationProvider} />
                     ) : activeWorkspace === "canvas" ? (
-                      <CollaborationCanvas accent={theme.accent} locale={locale} provider={collaborationProvider} />
+                      <CollaborationCanvas accent={theme.accent} locale={locale} onFeatureUsed={() => onFeatureUsed("canvas")} provider={collaborationProvider} />
                     ) : activeWorkspace === "status" ? (
                       <div className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
                         <OverlayScrollbar
@@ -2784,6 +2796,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const [connectionRoute, setConnectionRoute] = useState<ConnectionRoute>("direct");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [fileTransfers, setFileTransfers] = useState<FileTransferSnapshot[]>([]);
+  const usedFeaturesRef = useRef(new Set<MeasuredFeature>());
   const [canvasHasContent, setCanvasHasContent] = useState(false);
   const [collaborationProvider, setCollaborationProvider] = useState<P2PCollaborationProvider | null>(null);
   const [collaborationPeerCursor, setCollaborationPeerCursor] = useState(false);
@@ -2811,6 +2824,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const fileTransfersRef = useRef<FileTransferSnapshot[]>([]);
   const fileTransferRefreshTimerRef = useRef<number | null>(null);
+  const completedTransferIdsRef = useRef(new Set<string>());
+  const connectionReportedRef = useRef(false);
   const peerTypingTimerRef = useRef<number | null>(null);
   const reconnectDialogTimerRef = useRef<number | null>(null);
   const rawMicrophoneTrackRef = useRef<MediaStreamTrack | null>(null);
@@ -2872,6 +2887,16 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const fileManagerRef = useRef<FileTransferManager | null>(null);
   const lastTypingSentAtRef = useRef(0);
 
+  const reportFeatureUsage = (feature: MeasuredFeature) => {
+    if (usedFeaturesRef.current.has(feature)) return;
+    usedFeaturesRef.current.add(feature);
+    trackInsightEvent("feature_used", { feature });
+  };
+
+  useEffect(() => {
+    usedFeaturesRef.current.clear();
+  }, [roomId]);
+
   useEffect(() => {
     const manager = new FileTransferManager({
       onError: (id, message) => setError(message),
@@ -2884,6 +2909,13 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         const current = fileTransfersRef.current;
         const index = current.findIndex((item) => item.id === snapshot.id);
         const previous = index < 0 ? undefined : current[index];
+        if (snapshot.state === "complete" && previous?.state !== "complete" && !completedTransferIdsRef.current.has(snapshot.id)) {
+          completedTransferIdsRef.current.add(snapshot.id);
+          trackInsightEvent("file_transfer_completed", {
+            direction: snapshot.direction,
+            size_bucket: fileSizeBucket(snapshot.size),
+          });
+        }
         const next = index < 0 ? [...current, snapshot] : current.map((item, itemIndex) => itemIndex === index ? snapshot : item);
         fileTransfersRef.current = next;
         const stateChanged = !previous || previous.state !== snapshot.state || previous.error !== snapshot.error;
@@ -2910,6 +2942,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       void manager.dispose();
       fileManagerRef.current = null;
       fileTransfersRef.current = [];
+      completedTransferIdsRef.current.clear();
       setFileTransfers([]);
     };
   }, [roomId]);
@@ -3063,6 +3096,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         kind: videoTrack ? "video" : "audio",
         playing: true,
       });
+      trackInsightEvent("shared_playback_started", { media_type: videoTrack ? "video" : "audio" });
+      reportFeatureUsage("shared_playback");
       sharedPlaybackTransitionRef.current = false;
       publishSharedPlaybackState(true);
     } catch (cause) {
@@ -3198,6 +3233,10 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
             : message));
         }
         fileManagerRef.current?.onTransportReady();
+        if (!connectionReportedRef.current) {
+          connectionReportedRef.current = true;
+          trackInsightEvent("p2p_session_connected", { locale });
+        }
         setError(null);
         setDialogPhase("closing-for-ready");
       },
@@ -3274,6 +3313,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       },
     );
     sessionRef.current = session;
+    connectionReportedRef.current = false;
     const provider = new P2PCollaborationProvider(session);
     setCollaborationProvider(provider);
     setMediaTransport(session.media);
@@ -3354,10 +3394,22 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   };
 
   const offerFiles = (files: FileList | File[]) => {
-    for (const file of Array.from(files)) fileManagerRef.current?.offerFile(file, cuid());
+    const selectedFiles = Array.from(files);
+    if (!fileManagerRef.current || !selectedFiles.length) return;
+    trackInsightEvent("file_transfer_offered", {
+      file_count: selectedFiles.length,
+      largest_size_bucket: fileSizeBucket(Math.max(...selectedFiles.map((file) => file.size))),
+    });
+    reportFeatureUsage("files");
+    for (const file of selectedFiles) fileManagerRef.current.offerFile(file, cuid());
   };
 
-  const acceptFile = (id: string) => { void fileManagerRef.current?.acceptFile(id); };
+  const acceptFile = (id: string) => {
+    if (!fileManagerRef.current) return;
+    trackInsightEvent("file_transfer_accepted");
+    reportFeatureUsage("files");
+    void fileManagerRef.current.acceptFile(id);
+  };
   const cancelFile = (id: string) => fileManagerRef.current?.cancelFile(id);
   const deleteFile = (id: string) => fileManagerRef.current?.deleteFile(id);
   const downloadFile = (id: string) => { fileManagerRef.current?.downloadFile(id); };
@@ -3398,6 +3450,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       sentAt: Date.now(),
       text: message,
     }));
+    reportFeatureUsage("chat");
     return true;
   };
 
@@ -3451,6 +3504,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       rawMicrophoneTrackRef.current = track;
       setMicrophoneActive(true);
       setMicrophoneDeviceId(track.getSettings().deviceId ?? null);
+      trackInsightEvent("microphone_started");
+      reportFeatureUsage("voice");
     } catch (cause) {
       setMicrophoneActive(false);
       setMicrophoneError(cause instanceof Error ? cause.message : locale === "zh" ? "无法开启麦克风。" : "Could not turn on the microphone.");
@@ -3568,6 +3623,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       }, { once: true });
       setCameraActive(true);
       setCameraDeviceId(track.getSettings().deviceId ?? null);
+      trackInsightEvent("camera_started", { quality: videoQuality });
+      reportFeatureUsage("camera");
     } finally {
       setCameraPending(false);
     }
@@ -3643,6 +3700,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         void media.replaceLocalTrack("screen-audio", null, "ended");
       }, { once: true });
       setScreenShareActive(true);
+      trackInsightEvent("screen_share_started", { includes_audio: Boolean(screenAudioTrackRef.current) });
+      reportFeatureUsage("screen_share");
     } finally {
       setCameraPending(false);
     }
@@ -3705,6 +3764,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
           collaborationPeerCursor={collaborationPeerCursor}
           fileTransfers={fileTransfers}
           locale={locale}
+          onFeatureUsed={reportFeatureUsage}
           onLeave={leave}
           onChatTyping={sendChatTyping}
           onAcceptFile={acceptFile}

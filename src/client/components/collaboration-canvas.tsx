@@ -89,7 +89,7 @@ function CanvasToolButton({ active = false, children, label, onClick }: { active
   );
 }
 
-export function CollaborationCanvas({ accent, locale, provider }: { accent: string; locale: Locale; provider: P2PCollaborationProvider | null }) {
+export function CollaborationCanvas({ accent, locale, onFeatureUsed, provider }: { accent: string; locale: Locale; onFeatureUsed: () => void; provider: P2PCollaborationProvider | null }) {
   const [color, setColor] = useState(accent);
   const [colorPickerOpen, setColorPickerOpen] = useState(false);
   const [hexInput, setHexInput] = useState(accent.toUpperCase());
@@ -218,6 +218,7 @@ export function CollaborationCanvas({ accent, locale, provider }: { accent: stri
       strokes.push([stroke]);
     });
     activeStrokeRef.current = { points, stroke };
+    onFeatureUsed();
     queuePoint(point);
   };
 

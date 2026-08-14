@@ -5,11 +5,15 @@ export default function Layout({ children, title = "ZestSend - P2P文件传输" 
     document.title = title;
     if (import.meta.env.DEV) return;
 
+    const existing = document.querySelector<HTMLScriptElement>('script[data-insightflare-site="421ced79-a0af-4305-aa51-859ae620b29e"]');
+    if (existing) return;
+
     const analytics = document.createElement("script");
+    analytics.dataset.insightflareSite = "421ced79-a0af-4305-aa51-859ae620b29e";
     analytics.src = "https://insight.ravelloh.com/script.js?siteId=421ced79-a0af-4305-aa51-859ae620b29e";
     analytics.defer = true;
+    analytics.addEventListener("load", () => window.dispatchEvent(new Event("insightflare:ready")), { once: true });
     document.head.append(analytics);
-    return () => analytics.remove();
   }, [title]);
 
   return (

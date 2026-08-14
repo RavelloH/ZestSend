@@ -46,6 +46,7 @@ import {
 import { LetterCascade } from "../components/ui/letter-cascade";
 import { Signature } from "../components/ui/signature";
 import { TextRepel } from "../components/ui/text-repel";
+import { trackInsightEvent } from "../lib/insightflare";
 import { prepareIceServers, preloadIceServers, type IceDiagnosticEntry, type IcePreparationResult } from "../lib/webrtc";
 
 type HomeLocale = "en" | "zh";
@@ -915,6 +916,7 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
 
   const handleRoomCodeComplete = useCallback(
     (roomId: string) => {
+      trackInsightEvent("room_join_requested", { locale });
       void navigate({
         to: locale === "zh" ? "/zh/room/$roomId" : "/en/room/$roomId",
         params: { roomId },

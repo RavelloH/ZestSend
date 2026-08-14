@@ -23,7 +23,7 @@ import {
   RiListUnordered,
   RiStrikethrough,
 } from "@remixicon/react";
-import { type CSSProperties, type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import { P2PCollaborationProvider } from "../lib/p2p-collaboration";
 
@@ -69,18 +69,30 @@ function positionRemoteCaret(caret: HTMLElement) {
   visual.classList.add("zest-collaboration-caret-visible");
 }
 
-function CollaborationEditor({ accent, locale, provider }: { accent: string; locale: Locale; provider: P2PCollaborationProvider }) {
+function CollaborationEditor({ accent, locale, onFeatureUsed, provider }: { accent: string; locale: Locale; onFeatureUsed: () => void; provider: P2PCollaborationProvider }) {
   const [editor, setEditor] = useState<Editor | null>(null);
   const [version, setVersion] = useState(0);
   const [linkOpen, setLinkOpen] = useState(false);
   const [linkValue, setLinkValue] = useState("");
+  const documentEditedRef = useRef(false);
   const user = useMemo(() => ({ color: "#67d5ff", name: "Peer" }), []);
+  const reportDocumentEdited = () => {
+    if (documentEditedRef.current) return;
+    documentEditedRef.current = true;
+    onFeatureUsed();
+  };
 
   const tiptap = useEditor({
     editorProps: {
       attributes: {
         class: "zest-collaboration-editor",
         spellcheck: "true",
+      },
+      handleDOMEvents: {
+        input: () => {
+          reportDocumentEdited();
+          return false;
+        },
       },
     },
     extensions: [
@@ -206,11 +218,15 @@ function CollaborationEditor({ accent, locale, provider }: { accent: string; loc
     const href = linkValue.trim();
     if (!href) tiptap.chain().focus().extendMarkRange("link").unsetLink().run();
     else tiptap.chain().focus().extendMarkRange("link").setLink({ href: /^https?:\/\//i.test(href) ? href : `https://${href}` }).run();
+    reportDocumentEdited();
     setLinkOpen(false);
   };
 
   const command = (callback: (instance: Editor) => void) => () => {
-    if (tiptap) callback(tiptap);
+    if (tiptap) {
+      callback(tiptap);
+      reportDocumentEdited();
+    }
   };
   const characters = tiptap?.storage.characterCount?.characters() ?? 0;
   const words = tiptap?.storage.characterCount?.words() ?? 0;
@@ -255,9 +271,9 @@ function CollaborationEditor({ accent, locale, provider }: { accent: string; loc
   );
 }
 
-export function CollaborationWorkspace({ accent, locale, provider }: { accent: string; locale: Locale; provider: P2PCollaborationProvider | null }) {
+export function CollaborationWorkspace({ accent, locale, onFeatureUsed, provider }: { accent: string; locale: Locale; onFeatureUsed: () => void; provider: P2PCollaborationProvider | null }) {
   if (!provider) {
     return <div className="flex size-full items-center justify-center text-sm font-medium tracking-[0.05em] text-sky-100/55">{locale === "zh" ? "正在准备协作文档…" : "Preparing collaborative document…"}</div>;
   }
-  return <CollaborationEditor accent={accent} key={provider.document.clientID} locale={locale} provider={provider} />;
+  return <CollaborationEditor accent={accent} key={provider.document.clientID} locale={locale} onFeatureUsed={onFeatureUsed} provider={provider} />;
 }
