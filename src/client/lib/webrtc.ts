@@ -957,6 +957,10 @@ export class NativeWebRTCSession {
       const eventEpoch = v2Epoch(message.epoch);
       if (eventEpoch !== undefined && this.epoch !== 0 && eventEpoch < this.epoch) return;
       if (message.peerSessionId && this.remotePeerSessionId && message.peerSessionId !== this.remotePeerSessionId) return;
+      if (eventEpoch !== undefined && eventEpoch > this.epoch) {
+        this.epoch = eventEpoch;
+        this.pendingSignals = [];
+      }
       this.remoteParticipantJoined = false; this.remoteSlotId = null; this.remotePeerSessionId = null;
       this.remoteSignalingDisconnected = false;
       this.stopDataChannelLatencyProbe(); this.closeDataChannels(); this.mediaTransport.detachPeer();
