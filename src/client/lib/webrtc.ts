@@ -556,6 +556,7 @@ export class NativeWebRTCSession {
   private pendingSignals: V2Signal[] = [];
   private signalFlushPromise: Promise<void> | null = null;
   private negotiationPromise: Promise<void> | null = null;
+  private offerRetryQueued = false;
   private remoteParticipantJoined = false;
   private remoteSignalingDisconnected = false;
   private remoteSlotId: string | null = null;
@@ -660,7 +661,7 @@ export class NativeWebRTCSession {
     this.remoteSignalingDisconnected = false;
     this.remoteSlotId = null;
     this.remotePeerSessionId = null;
-    this.onStatus({ detail: "Opening signaling socket", state: "connecting" });
+    this.onStatus({ detail: "Reconnecting signaling socket", state: "reconnecting" });
     void this.prepareIceServers();
     this.openSocket(this.resumeToken ? "resume-signaling" : "new", true);
   }
@@ -822,7 +823,9 @@ export class NativeWebRTCSession {
         void this.prepareIceServers();
       };
       socket.onmessage = (event) => {
-        if (generation === this.socketGeneration && !this.closed && !this.suspended) this.handleSocketMessage(String(event.data));
+        if (generation === this.socketGeneration && !this.suspended && (!this.closed || this.leaving)) {
+          this.handleSocketMessage(String(event.data));
+        }
       };
       socket.onerror = () => {
         if (generation !== this.socketGeneration || this.closed || this.suspended) return;
@@ -852,6 +855,9 @@ export class NativeWebRTCSession {
       if (typeof message.resumeToken === "string" && message.resumeToken.length <= 512) {
         this.resumeToken = message.resumeToken; v2WriteResumeToken(this.roomId, message.resumeToken);
       }
+      // Once admitted, ordinary signaling reconnects must resume this seat;
+      // only an explicit peer restart should rotate the peer session.
+      this.reconnectMode = this.resumeToken ? "resume-signaling" : "new";
       this.initiator = message.offererSlotId ? message.offererSlotId === this.slotId : message.isInitiator;
       const hadRemoteParticipant = this.remoteParticipantJoined;
       this.remoteParticipantJoined = message.peerCount > 1;
@@ -920,6 +926,10 @@ export class NativeWebRTCSession {
         this.remoteSignalingDisconnected = false;
         this.peerRestarting = false;
         this.onStatus({ detail: "Signaling socket connected", state: "connected" });
+        const peerNeedsReset = !this.peer
+          || this.peer.connectionState !== "connected"
+          || this.openDataChannelCount() !== DATA_CHANNEL_COUNT;
+        if (this.peer && peerNeedsReset) this.resetPeerForNegotiation();
         if (!this.peer && this.readyForPeerConnection && this.initiator) void this.createOffer();
       }
       return;
@@ -1003,21 +1013,36 @@ export class NativeWebRTCSession {
   }
 
   private async createOffer(): Promise<void> {
-    if (!this.readyForPeerConnection || !this.remoteParticipantJoined || !this.initiator || this.closed || this.suspended || this.peer || this.negotiationPromise) return;
+    if (!this.readyForPeerConnection || !this.remoteParticipantJoined || !this.initiator || this.closed || this.suspended || this.peer) return;
+    if (this.negotiationPromise) {
+      if (!this.offerRetryQueued) {
+        this.offerRetryQueued = true;
+        const pending = this.negotiationPromise;
+        const retry = () => {
+          this.offerRetryQueued = false;
+          if (!this.closed && !this.suspended && this.remoteParticipantJoined && this.initiator && this.readyForPeerConnection && !this.peer) {
+            void this.createOffer();
+          }
+        };
+        void pending.then(retry, retry);
+      }
+      return;
+    }
     this.negotiationPromise = this.performCreateOffer().finally(() => { this.negotiationPromise = null; });
     await this.negotiationPromise;
   }
 
   private async performCreateOffer(): Promise<void> {
     const peer = this.createPeerConnection();
+    const offerEpoch = this.epoch;
     this.mediaTransport.prepareOffer(peer);
     for (const name of DATA_CHANNEL_NAMES) this.attachDataChannel(peer.createDataChannel(name, { ordered: name !== "bulk" }));
     this.setStep("p2p", { state: "checking", detail: "Creating P2P offer" });
     try {
       const offer = await peer.createOffer();
-      if (this.closed || this.peer !== peer) return;
+      if (this.closed || this.suspended || this.peer !== peer || this.epoch !== offerEpoch) return;
       await peer.setLocalDescription(offer);
-      if (this.closed || this.peer !== peer) return;
+      if (this.closed || this.suspended || this.peer !== peer || this.epoch !== offerEpoch) return;
       this.sendSignal({ description: offer });
     } catch { if (!this.closed && this.peer === peer) this.requestPeerRestart(); }
   }
@@ -1045,24 +1070,34 @@ export class NativeWebRTCSession {
   }
 
   private async flushSignalsInternal(): Promise<void> {
-    while (this.pendingSignals.length && !this.closed) {
+    while (this.pendingSignals.length && !this.closed && !this.suspended) {
       const signal = this.pendingSignals.shift();
       if (!signal?.payload) continue;
       const { candidate, description } = signal.payload;
+      const signalEpoch = this.epoch;
       try {
         if (description) {
           const peer = this.peer ?? this.createPeerConnection();
           if (description.type === "offer" && peer.signalingState === "have-local-offer") await peer.setLocalDescription({ type: "rollback" });
+          if (this.closed || this.suspended || this.peer !== peer || this.epoch !== signalEpoch) return;
           await peer.setRemoteDescription(description);
+          if (this.closed || this.suspended || this.peer !== peer || this.epoch !== signalEpoch) return;
           if (description.type === "offer") {
             this.mediaTransport.bindIncomingPeer(peer);
             this.setStep("p2p", { state: "checking", detail: "Accepting P2P offer" });
-            const answer = await peer.createAnswer(); await peer.setLocalDescription(answer); this.sendSignal({ description: answer });
+            const answer = await peer.createAnswer();
+            if (this.closed || this.suspended || this.peer !== peer || this.epoch !== signalEpoch) return;
+            await peer.setLocalDescription(answer);
+            if (this.closed || this.suspended || this.peer !== peer || this.epoch !== signalEpoch) return;
+            this.sendSignal({ description: answer });
           }
         }
         if (candidate) {
           const peer = this.peer;
-          if (peer?.remoteDescription) await peer.addIceCandidate(candidate);
+          if (peer?.remoteDescription) {
+            await peer.addIceCandidate(candidate);
+            if (this.closed || this.suspended || this.peer !== peer || this.epoch !== signalEpoch) return;
+          }
           else {
             // Candidates can arrive before the offer. Keep them behind any
             // queued description so one early candidate cannot block the
@@ -1125,12 +1160,15 @@ export class NativeWebRTCSession {
   }
 
   private requestPeerRestart(): void {
-    if (this.closed || this.suspended || this.peerRestarting || this.remoteSignalingDisconnected || !this.remoteParticipantJoined) return;
-    this.peerRestarting = true; this.connectedNotified = false; this.stopDataChannelLatencyProbe(); this.closeDataChannels();
+    if (this.closed || this.suspended || this.peerRestarting || !this.remoteParticipantJoined) return;
+    const waitForRemote = this.remoteSignalingDisconnected;
+    this.peerRestarting = !waitForRemote;
+    this.connectedNotified = false; this.stopDataChannelLatencyProbe(); this.closeDataChannels();
     this.mediaTransport.detachPeer(); const peer = this.peer; this.peer = null; peer?.close();
     this.setStep("p2p", { state: "checking", detail: "Reconnecting peer-to-peer connection" });
     this.setStep("dataChannel", { channels: 0, state: "checking", detail: "Reconnecting data channels", transferred: this.dataTransfer() });
-    this.onStatus({ detail: "Reconnecting peer-to-peer connection", state: "reconnecting" }); this.openSocket("restart-peer");
+    this.onStatus({ detail: waitForRemote ? "Waiting for the other participant to reconnect" : "Reconnecting peer-to-peer connection", state: "reconnecting" });
+    if (!waitForRemote) this.openSocket("restart-peer");
   }
 
   private detectConnectionRoute = async (peer: RTCPeerConnection): Promise<void> => {
