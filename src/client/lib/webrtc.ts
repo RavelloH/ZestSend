@@ -684,7 +684,7 @@ export class NativeWebRTCSession {
     }
   }
 
-  private finishClose(): void {
+  private finishClose(preserveResumeToken = false): void {
     if (this.leaveAckTimer !== undefined) {
       window.clearTimeout(this.leaveAckTimer);
       this.leaveAckTimer = undefined;
@@ -703,8 +703,10 @@ export class NativeWebRTCSession {
     this.socket = null;
     this.leaving = false;
     this.suspended = false;
-    this.resumeToken = null;
-    v2WriteResumeToken(this.roomId, null);
+    if (!preserveResumeToken) {
+      this.resumeToken = null;
+      v2WriteResumeToken(this.roomId, null);
+    }
   }
 
   send(data: string | ArrayBuffer | Blob): boolean { return this.sendOnChannel("interactive", data); }
@@ -939,14 +941,7 @@ export class NativeWebRTCSession {
     }
     if (message.type === "replaced") {
       this.closed = true;
-      this.stopHeartbeat();
-      this.stopDataChannelLatencyProbe();
-      this.closeDataChannels();
-      this.mediaTransport.detachPeer();
-      this.peer?.close();
-      this.peer = null;
-      this.socket?.close(1_000, "Connection replaced");
-      this.socket = null;
+      this.finishClose(true);
       this.onStatus({ detail: "Signaling connection replaced", state: "closed" });
       return;
     }
