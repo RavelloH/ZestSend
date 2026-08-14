@@ -686,6 +686,7 @@ export class NativeWebRTCSession {
 
   private finishClose(preserveResumeToken = false): void {
     const sessionResumeToken = this.resumeToken;
+    this.clearReconnectTimer();
     if (this.leaveAckTimer !== undefined) {
       window.clearTimeout(this.leaveAckTimer);
       this.leaveAckTimer = undefined;
