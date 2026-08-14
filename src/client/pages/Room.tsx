@@ -82,6 +82,7 @@ import {
   type ConnectionProgress,
   type ConnectionState,
   type ConnectionStep,
+  type SessionStatus,
   type WebRTCTransportDiagnostics,
 } from "../lib/webrtc";
 
@@ -322,6 +323,11 @@ const detailTranslation: Record<string, string> = {
   "Data channels ready": "数据通道已就绪",
   "Data channel closed": "数据通道已关闭",
   "Data channel failed.": "与对方断开连接，正在重新连接。",
+  "Reconnecting signaling socket": "正在重新连接信令 WebSocket",
+  "Room temporarily reserved; retrying automatically": "房间暂时保留中，正在自动重试",
+  "Reconnecting peer-to-peer connection": "正在重新连接端对端通道",
+  "Reconnecting data channels": "正在重新连接数据通道",
+  "Waiting for the other participant to reconnect": "正在等待另一位参与者重新连接",
   "The signaling WebSocket could not be opened.": "无法打开信令 WebSocket",
 };
 
@@ -3112,6 +3118,15 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   }, [sharedPlaybackVolume]);
 
   useEffect(() => {
+    const showReconnectDialog = (detail = "Reconnecting signaling socket") => {
+      setError(detail);
+      setDialogPhase((current) => current === "ready" ? "closing-for-reconnect" : current === "closing-for-reconnect" ? current : "connecting");
+      if (reconnectDialogTimerRef.current !== null) window.clearTimeout(reconnectDialogTimerRef.current);
+      reconnectDialogTimerRef.current = window.setTimeout(() => {
+        reconnectDialogTimerRef.current = null;
+        setDialogPhase((current) => current === "closing-for-reconnect" ? "connecting" : current);
+      }, 180);
+    };
     const session = new NativeWebRTCSession(
       roomId,
       setProgress,
@@ -3127,6 +3142,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
             : message));
         }
         fileManagerRef.current?.onTransportReady();
+        setError(null);
         setDialogPhase("closing-for-ready");
       },
       setError,
@@ -3135,7 +3151,6 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         setDialogPhase("closing-for-full");
       },
       () => {
-        setError("Data channel failed.");
         if (peerTypingTimerRef.current !== null) window.clearTimeout(peerTypingTimerRef.current);
         peerTypingTimerRef.current = null;
         setPeerTyping(false);
@@ -3148,9 +3163,14 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         void fileManagerRef.current?.clearSession();
         void clearLocalSharedPlayback(false);
         if (sharedPlaybackRef.current?.owner === "remote") updateSharedPlayback(null);
+        session.media.stopLocalTracks();
+        rawMicrophoneTrackRef.current?.stop();
         rawMicrophoneTrackRef.current = null;
+        cameraTrackRef.current?.stop();
         cameraTrackRef.current = null;
+        screenVideoTrackRef.current?.stop();
         screenVideoTrackRef.current = null;
+        screenAudioTrackRef.current?.stop();
         screenAudioTrackRef.current = null;
         setMicrophoneActive(false);
         setMicrophoneDeviceId(null);
@@ -3159,12 +3179,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         setScreenShareActive(false);
         setScreenAudioFallbackOpen(false);
         setConnectionRoute("direct");
-        setDialogPhase("closing-for-reconnect");
-        if (reconnectDialogTimerRef.current !== null) window.clearTimeout(reconnectDialogTimerRef.current);
-        reconnectDialogTimerRef.current = window.setTimeout(() => {
-          reconnectDialogTimerRef.current = null;
-          setDialogPhase((current) => current === "closing-for-reconnect" ? "connecting" : current);
-        }, 300);
+        showReconnectDialog("Waiting for the other participant to reconnect");
       },
       setConnectionRoute,
       (message) => {
@@ -3194,6 +3209,13 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         }, 3_000);
       },
       handleSharedPlaybackMessage,
+      (status: SessionStatus) => {
+        if (status.state === "reconnecting" || status.state === "reserved") {
+          showReconnectDialog(status.detail);
+          return;
+        }
+        if (status.state === "connected") setError(null);
+      },
     );
     sessionRef.current = session;
     setMediaTransport(session.media);
@@ -3209,11 +3231,25 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     });
     session.attachFileTransferManager(fileManagerRef.current);
     session.connect();
+    let pageHidden = false;
+    const handlePageHide = () => {
+      pageHidden = true;
+      session.suspend();
+    };
+    const handlePageShow = () => {
+      pageHidden = false;
+      session.resume();
+    };
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("pageshow", handlePageShow);
 
     return () => {
       if (peerTypingTimerRef.current !== null) window.clearTimeout(peerTypingTimerRef.current);
       peerTypingTimerRef.current = null;
-      session.close();
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("pageshow", handlePageShow);
+      if (pageHidden) session.suspend();
+      else session.close();
       unsubscribeMedia();
       rawMicrophoneTrackRef.current?.stop();
       rawMicrophoneTrackRef.current = null;

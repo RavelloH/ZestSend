@@ -2,7 +2,7 @@
 
 import { cn } from "@/lib/utils";
 import {
-    type AnimationOptions,
+    type DynamicAnimationOptions,
     motion,
     stagger,
     useAnimate,
@@ -48,12 +48,12 @@ export function LetterCascade({
         if (blocked) return;
         setBlocked(true);
 
-        const merge = (base: AnimationOptions): AnimationOptions => ({
+        const merge = (base: DynamicAnimationOptions): DynamicAnimationOptions => ({
             ...base,
             delay: stagger(staggerDuration, { from: staggerFrom }),
         });
 
-        const spring: AnimationOptions = {
+        const spring: DynamicAnimationOptions = {
             type: "spring",
             stiffness,
             damping,
