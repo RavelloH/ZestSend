@@ -685,6 +685,7 @@ export class NativeWebRTCSession {
   }
 
   private finishClose(preserveResumeToken = false): void {
+    const sessionResumeToken = this.resumeToken;
     if (this.leaveAckTimer !== undefined) {
       window.clearTimeout(this.leaveAckTimer);
       this.leaveAckTimer = undefined;
@@ -704,8 +705,13 @@ export class NativeWebRTCSession {
     this.leaving = false;
     this.suspended = false;
     if (!preserveResumeToken) {
+      // A remounted session can rotate the shared tab token while an older
+      // session is still waiting for its leave acknowledgement. Only clear
+      // storage when it still belongs to this session.
+      if (sessionResumeToken && v2ReadResumeToken(this.roomId) === sessionResumeToken) {
+        v2WriteResumeToken(this.roomId, null);
+      }
       this.resumeToken = null;
-      v2WriteResumeToken(this.roomId, null);
     }
   }
 
