@@ -925,7 +925,7 @@ export default function Home({ locale = "en" }: { locale?: HomeLocale }) {
 
   return (
     <Layout title={copy.title}>
-      <section className="relative min-h-screen w-full overflow-hidden" aria-labelledby="home-title">
+      <section className="relative h-full min-h-0 w-full overflow-hidden" aria-labelledby="home-title">
         <h1 id="home-title" className="sr-only">{copy.heading}</h1>
         <div className="absolute inset-x-0 top-[calc(50%_-_26rem)] h-[400px] sm:top-[calc(50%_-_27rem)]" aria-hidden="true">
           <CursorDrivenParticleTypography

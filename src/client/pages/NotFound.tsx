@@ -6,7 +6,7 @@ export default function NotFound() {
     <Layout title="ZestSend — 404">
       <main
         aria-label="Page not found. Click anywhere to return home."
-        className="flex min-h-screen cursor-pointer flex-col items-center justify-center gap-1 overflow-hidden px-4 sm:gap-5"
+        className="flex h-full min-h-0 cursor-pointer flex-col items-center justify-center gap-1 overflow-hidden px-4 sm:gap-5"
         onClick={() => window.location.assign("/")}
         role="button"
         tabIndex={0}

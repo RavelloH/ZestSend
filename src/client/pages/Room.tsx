@@ -963,11 +963,13 @@ function AudioSpectrum({
   accent,
   active,
   anchor,
+  fillAvailableHeight = false,
   stream,
 }: {
   accent: string;
   active: boolean;
   anchor: "bottom" | "top";
+  fillAvailableHeight?: boolean;
   stream?: MediaStream;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1045,7 +1047,7 @@ function AudioSpectrum({
     };
   }, [accent, active, anchor, stream]);
 
-  return <div className="flex h-[clamp(8rem,28vh,13rem)] w-full shrink-0">
+  return <div className={fillAvailableHeight ? "flex min-h-0 w-full flex-1 basis-1/2" : "flex h-[clamp(8rem,28vh,13rem)] w-full shrink-0"}>
     <canvas aria-label={anchor === "top" ? "Remote audio spectrum" : "Local audio spectrum"} className="size-full" ref={canvasRef} />
   </div>;
 }
@@ -1511,14 +1513,14 @@ function VideoWorkspace({
   }, [tiles]);
 
   return <VideoShell
-    footer={<div className="flex h-full items-center justify-center gap-7 sm:gap-10">
+    footer={<div className="flex h-full items-center justify-center gap-3 sm:gap-10">
       {[
         { active: screenShareActive, icon: RiComputerLine, label: screenShareActive ? copy.screenOn : copy.screen, onClick: onToggleScreenShare },
         { active: speakerActive, icon: RiVolumeUpLine, label: copy.speaker, onClick: onOpenSpeakerDialog },
         { active: cameraActive, icon: cameraActive ? RiCameraOffLine : RiCameraLine, label: cameraActive ? copy.cameraOn : copy.cameraOff, onClick: onToggleCamera },
         { active: Boolean(cameraDeviceId), icon: RiCameraSwitchLine, label: copy.chooseCamera, onClick: () => setCameraDialogOpen(true) },
         { active: false, icon: RiSettings3Line, label: copy.quality, onClick: () => setSettingsDialogOpen(true) },
-      ].map(({ active, icon: Icon, label, onClick }) => <div className="flex flex-col items-center gap-2" key={label}>
+      ].map(({ active, icon: Icon, label, onClick }) => <div className="flex min-w-0 flex-col items-center gap-1 sm:gap-2" key={label}>
         <Clickable
           aria-label={label}
           className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200"
@@ -1528,7 +1530,7 @@ function VideoWorkspace({
           style={{ backgroundColor: active ? `${accent}33` : "rgb(0 0 0 / 0.25)" }}
           tapScale={0.94}
         ><Icon aria-hidden="true" className="size-7" /></Clickable>
-        <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{label}</span>
+        <span className="pointer-events-none hidden min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55 sm:block">{label}</span>
       </div>)}
     </div>}
   >
@@ -1714,7 +1716,7 @@ function WatchWorkspace({
   }, [playback?.id]);
 
   return <VideoShell
-    footer={<div className="flex h-full items-center justify-center gap-7 sm:gap-10">
+    footer={<div className="flex h-full items-center justify-center gap-4 sm:gap-10">
       <input
         accept="audio/*,video/*"
         className="sr-only"
@@ -1726,7 +1728,7 @@ function WatchWorkspace({
         ref={pickerRef}
         type="file"
       />
-      <div className="flex flex-col items-center gap-2">
+      <div className="flex flex-col items-center gap-1 sm:gap-2">
         <Clickable
           aria-label={copy.speaker}
           className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200"
@@ -1737,9 +1739,9 @@ function WatchWorkspace({
         >
           <RiVolumeUpLine aria-hidden="true" className="size-7" />
         </Clickable>
-        <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.speaker}</span>
+        <span className="pointer-events-none hidden min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55 sm:block">{copy.speaker}</span>
       </div>
-      <div className="flex flex-col items-center gap-2">
+      <div className="flex flex-col items-center gap-1 sm:gap-2">
         <Clickable
           aria-label={playback?.playing ? copy.pause : copy.play}
           className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200"
@@ -1751,9 +1753,9 @@ function WatchWorkspace({
         >
           {playback?.playing ? <RiPauseLine aria-hidden="true" className="size-7" /> : <RiPlayLine aria-hidden="true" className="ml-0.5 size-7" />}
         </Clickable>
-        <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{playback?.playing ? copy.pause : copy.play}</span>
+        <span className="pointer-events-none hidden min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55 sm:block">{playback?.playing ? copy.pause : copy.play}</span>
       </div>
-      <div className="flex flex-col items-center gap-2">
+      <div className="flex flex-col items-center gap-1 sm:gap-2">
         <Clickable
           aria-label={copy.stop}
           className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border text-sky-50 transition-[background-color,border-color,color] duration-200"
@@ -1763,7 +1765,7 @@ function WatchWorkspace({
           style={playback ? { backgroundColor: "rgba(136, 19, 55, 0.45)", borderColor: "rgba(244, 63, 94, 0.42)", color: "rgb(255 228 230)" } : { backgroundColor: "rgb(0 0 0 / 0.25)" }}
           tapScale={0.94}
         ><RiStopLine aria-hidden="true" className="size-7" /></Clickable>
-        <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.stop}</span>
+        <span className="pointer-events-none hidden min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55 sm:block">{copy.stop}</span>
       </div>
     </div>}
   >
@@ -1924,8 +1926,8 @@ function VoiceWorkspace({
   return (
     <WorkspaceShell
       footer={(
-        <div className="flex h-full items-center justify-center gap-7 sm:gap-10">
-          <div className="flex flex-col items-center gap-2">
+        <div className="flex h-full items-center justify-center gap-3 sm:gap-10">
+          <div className="flex min-w-0 flex-col items-center gap-1 sm:gap-2">
             <Clickable
               aria-label={copy.noiseReduction}
               className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200"
@@ -1937,15 +1939,15 @@ function VoiceWorkspace({
             >
               <RiEqualizerLine aria-hidden="true" className="size-7" />
             </Clickable>
-            <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.noiseReduction}</span>
+            <span className="pointer-events-none hidden min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55 sm:block">{copy.noiseReduction}</span>
           </div>
-          <div className="flex flex-col items-center gap-2">
+          <div className="flex min-w-0 flex-col items-center gap-1 sm:gap-2">
             <Clickable aria-label={copy.speaker} className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color] duration-200" hoverScale={1.08} onClick={onOpenSpeakerDialog} style={{ backgroundColor: speakerActive ? `${accent}33` : "rgb(0 0 0 / 0.25)" }} tapScale={0.94}>
               <RiVolumeUpLine aria-hidden="true" className="size-7" />
             </Clickable>
-            <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.speaker}</span>
+            <span className="pointer-events-none hidden min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55 sm:block">{copy.speaker}</span>
           </div>
-          <div className="flex flex-col items-center gap-2">
+          <div className="flex min-w-0 flex-col items-center gap-1 sm:gap-2">
             <Clickable
               aria-label={microphoneActive ? copy.microphoneOn : copy.microphoneOff}
               className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50 transition-[background-color,color,opacity] duration-200"
@@ -1968,21 +1970,21 @@ function VoiceWorkspace({
                   : <RiMicOffLine aria-hidden="true" className="size-8" />}
               </AutoTransition>
             </Clickable>
-            <AutoTransition as="span" className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55" duration={0.18} presenceMode="wait" transitionKey={microphoneActive ? "on" : "off"} type="fade">
+            <AutoTransition as="span" className="pointer-events-none hidden min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55 sm:inline-block" duration={0.18} presenceMode="wait" transitionKey={microphoneActive ? "on" : "off"} type="fade">
               {microphoneActive ? copy.microphoneOn : copy.microphoneOff}
             </AutoTransition>
           </div>
-          <div className="flex flex-col items-center gap-2">
+          <div className="flex min-w-0 flex-col items-center gap-1 sm:gap-2">
             <Clickable aria-label={copy.microphoneInput} className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50" disabled={!ready || !microphoneActive || microphonePending} hoverScale={1.08} onClick={() => setDeviceDialogOpen(true)} tapScale={0.94}>
               <RiMic2Line aria-hidden="true" className="size-7" />
             </Clickable>
-            <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.microphoneInput}</span>
+            <span className="pointer-events-none hidden min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55 sm:block">{copy.microphoneInput}</span>
           </div>
-          <div className="flex flex-col items-center gap-2">
+          <div className="flex min-w-0 flex-col items-center gap-1 sm:gap-2">
             <Clickable aria-label={copy.voiceChanger} className="glass !size-16 !min-h-16 !min-w-16 !rounded-full border border-white/10 text-sky-50" disabled hoverScale={1.08} tapScale={0.94}>
               <RiMagicLine aria-hidden="true" className="size-7" />
             </Clickable>
-            <span className="pointer-events-none min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55">{copy.voiceChanger}</span>
+            <span className="pointer-events-none hidden min-h-4 select-none text-xs font-bold tracking-[0.08em] text-sky-100/55 sm:block">{copy.voiceChanger}</span>
           </div>
         </div>
       )}
@@ -1999,9 +2001,9 @@ function VoiceWorkspace({
       ) : undefined}
       scrollKey={mediaVersion}
     >
-      <div className="flex min-h-full flex-col justify-between px-2">
-        <AudioSpectrum accent={accent} active={Boolean(remoteStream)} anchor="top" stream={remoteStream} />
-        <AudioSpectrum accent={accent} active={microphoneActive} anchor="bottom" stream={localStream} />
+      <div className="flex h-full min-h-0 flex-col px-2">
+        <AudioSpectrum accent={accent} active={Boolean(remoteStream)} anchor="top" fillAvailableHeight stream={remoteStream} />
+        <AudioSpectrum accent={accent} active={microphoneActive} anchor="bottom" fillAvailableHeight stream={localStream} />
       </div>
       <Dialog open={deviceDialogOpen} onOpenChange={setDeviceDialogOpen}>
         <DialogContent aria-labelledby="voice-device-title" className="!max-w-md">
@@ -2478,14 +2480,14 @@ function RoomWorkspace({
       >
         <motion.div
           animate={{ opacity: isExiting ? 0 : 1 }}
-          className="relative flex min-h-full flex-1 flex-col p-5 sm:p-8"
+          className="zest-room-safe relative flex min-h-full flex-1 flex-col p-5 sm:p-8"
           transition={{ duration: 0.28, ease: "easeOut" }}
         >
           <header className="flex items-center justify-between gap-4">
             <div className="flex min-w-0 items-baseline gap-2.5">
               <motion.h1
                 animate={{ opacity: 1, x: 0 }}
-                className="bg-clip-text text-xl font-bold text-transparent md:text-2xl"
+                className="bg-clip-text text-lg font-bold text-transparent sm:text-xl md:text-2xl"
                 initial={{ opacity: 0, x: -20 }}
                 style={{
                   backgroundImage: `linear-gradient(45deg, ${theme.accent}, ${theme.accent}66)`,
@@ -2501,7 +2503,7 @@ function RoomWorkspace({
                   ZestSend
                 </a>
               </motion.h1>
-              <p className="truncate text-lg font-bold tracking-[0.06em] text-sky-100/65 sm:text-xl"># {roomId}</p>
+              <p className="truncate text-sm font-bold tracking-[0.06em] text-sky-100/65 sm:text-xl"># {roomId}</p>
             </div>
             <Clickable
               aria-label={showConnectionRates ? "Show connection quality" : "Show transfer rates"}
@@ -2534,8 +2536,8 @@ function RoomWorkspace({
                   <div className="w-full max-w-2xl">
                     <RiCheckboxCircleFill aria-hidden="true" className="mx-auto size-12 text-emerald-300" />
                     <p className="mt-5 text-xs font-bold tracking-[0.12em] text-sky-100/50">{workspace.room} {roomId}</p>
-                    <h1 id="connection-ready-title" className="mt-2 text-3xl font-bold tracking-[0.04em] text-sky-50">{copy.ready}</h1>
-                    <p className="mx-auto mt-4 max-w-lg text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/65">
+                    <h1 id="connection-ready-title" className="zest-room-heading mt-2 text-3xl font-bold tracking-[0.04em] text-sky-50">{copy.ready}</h1>
+                    <p className="zest-room-copy mx-auto mt-4 max-w-lg text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/65">
                       {copy.readyDescription}
                     </p>
                   </div>
@@ -2624,8 +2626,8 @@ function RoomWorkspace({
                               <div className="flex items-start gap-4">
                           <Icon aria-hidden="true" className="mt-1 size-8 text-sky-200" />
                           <div>
-                            <h1 id="connection-ready-title" className="text-3xl font-bold tracking-[0.04em] text-sky-50">{title}</h1>
-                            <p className="mt-2 text-sm font-medium tracking-[0.04em] text-sky-100/60">{workspace.statusHint}</p>
+                            <h1 id="connection-ready-title" className="zest-room-heading text-3xl font-bold tracking-[0.04em] text-sky-50">{title}</h1>
+                            <p className="zest-room-copy mt-2 text-sm font-medium tracking-[0.04em] text-sky-100/60">{workspace.statusHint}</p>
                           </div>
                         </div>
                             </div>
@@ -2643,8 +2645,8 @@ function RoomWorkspace({
                     ) : (
                       <div className="mx-auto max-w-xl text-center">
                         <Icon aria-hidden="true" className="mx-auto size-10 text-sky-200" />
-                        <h1 id="connection-ready-title" className="mt-5 text-3xl font-bold tracking-[0.04em] text-sky-50">{title}</h1>
-                        <p className="mx-auto mt-3 max-w-md text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/60">{description}</p>
+                        <h1 id="connection-ready-title" className="zest-room-heading mt-5 text-3xl font-bold tracking-[0.04em] text-sky-50">{title}</h1>
+                        <p className="zest-room-copy mx-auto mt-3 max-w-md text-sm font-medium leading-relaxed tracking-[0.04em] text-sky-100/60">{description}</p>
                         {isRunning ? <p className="mt-6 text-xs font-bold tracking-[0.1em] text-sky-100/40">{workspace.background}</p> : null}
                       </div>
                     )}
@@ -2659,7 +2661,7 @@ function RoomWorkspace({
             activateWorkspace("video");
           }} /> : null}
 
-          <div className="pointer-events-none absolute inset-x-0 bottom-5 flex justify-center sm:bottom-7">
+          <div className="zest-room-dock pointer-events-none absolute inset-x-0 bottom-5 flex justify-center sm:bottom-7">
             <div
               className="pointer-events-auto origin-bottom"
               style={{ transform: "scale(clamp(0.46, calc((100vw - 1.5rem) / 45rem), 1))" }}

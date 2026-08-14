@@ -158,7 +158,7 @@ export function DialogHeader({ className, ...props }: HTMLAttributes<HTMLDivElem
 }
 
 export function DialogTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
-  return <h2 className={cn("text-2xl font-bold tracking-[0.04em] text-sky-50 sm:text-3xl", className)} {...props} />;
+  return <h2 className={cn("text-xl font-bold tracking-[0.04em] text-sky-50 sm:text-3xl", className)} {...props} />;
 }
 
 export function DialogDescription({ className, ...props }: HTMLAttributes<HTMLParagraphElement>) {
