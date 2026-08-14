@@ -45,11 +45,20 @@ import type { FileTransferManager, FileTransferSnapshot } from "./file-transfer"
 import { MediaTransport, type MediaSlotControlMessage } from "./media-transport";
 
 type SignalMessage = {
+  epoch?: number;
+  fromSlotId?: string;
+  peerSessionId?: string;
   payload?: {
     candidate?: RTCIceCandidateInit;
     description?: RTCSessionDescriptionInit;
   };
   type: "signal";
+};
+
+export type SessionStatus = {
+  detail?: string;
+  retryAfterMs?: number;
+  state: "connecting" | "connected" | "reconnecting" | "reserved" | "closed";
 };
 
 type DataChannelPingMessage = {
@@ -107,11 +116,33 @@ function dataSize(data: unknown): number {
 }
 
 type ServerMessage =
-  | { isInitiator: boolean; peerCount: number; peerId: string; type: "welcome" }
-  | { peerId: string; type: "peer-ready" }
-  | { peerId?: string; type: "peer-left" }
+  | {
+      epoch?: number;
+      isInitiator: boolean;
+      offererSlotId?: string;
+      peerCount: number;
+      peerId?: string;
+      peerSessionId?: string;
+      resumed?: boolean;
+      resumeToken?: string;
+      slotId?: string;
+      type: "welcome";
+    }
+  | { epoch?: number; offererSlotId?: string; peerId?: string; peerSessionId?: string; slotId?: string; type: "peer-ready" }
+  | {
+      epoch?: number;
+      offererSlotId?: string;
+      peerId?: string;
+      peerSessionId?: string;
+      peers?: Array<{ peerSessionId?: string; slotId?: string }>;
+      slotId?: string;
+      type: "negotiate";
+    }
+  | { epoch?: number; offererSlotId?: string; peerId?: string; peerSessionId?: string; slotId?: string; type: "peer-disconnected" | "peer-reconnected" | "replaced" }
+  | { epoch?: number; peerId?: string; peerSessionId?: string; slotId?: string; type: "peer-left" }
   | SignalMessage
-  | { code?: "room-full"; message: string; type: "error" }
+  | { code?: "room-full" | "room-reserved" | "resume-invalid"; message: string; retryAfterMs?: number; type: "error" }
+  | { type: "left" }
   | { type: "pong" };
 
 type TurnResponse = { error?: string; iceServers?: RTCIceServer[] };
@@ -475,32 +506,85 @@ export function stopObservingIceServers(listener: IcePreparationListener): void 
   icePreparationListeners.delete(listener);
 }
 
-/** Native WebRTC session using a Durable Object WebSocket only for SDP and ICE signaling. */
+
+const V2_RECONNECT_DELAYS = [250, 500, 1_000, 2_000, 4_000, 5_000] as const;
+const V2_HEARTBEAT_INTERVAL = 15_000;
+const V2_MAX_HEARTBEAT_MISSES = 3;
+type V2HelloMode = "new" | "resume-signaling" | "restart-peer";
+
+function v2ResumeKey(roomId: string): string {
+  return `zestsend:room:${encodeURIComponent(roomId)}:resume`;
+}
+
+function v2ReadResumeToken(roomId: string): string | null {
+  try {
+    const token = window.sessionStorage.getItem(v2ResumeKey(roomId));
+    return token && token.length <= 512 ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+function v2WriteResumeToken(roomId: string, token: string | null): void {
+  try {
+    const key = v2ResumeKey(roomId);
+    if (token) window.sessionStorage.setItem(key, token);
+    else window.sessionStorage.removeItem(key);
+  } catch {
+    // sessionStorage is optional in private browsing contexts.
+  }
+}
+
+function v2Epoch(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return undefined;
+}
+
+type V2Signal = SignalMessage & { from?: string; peerId?: string };
+
+/** WebRTC session with resumable signaling and peer renegotiation. */
 export class NativeWebRTCSession {
-  private channels: Record<DataChannelName, RTCDataChannel | null> = {
-    bulk: null,
-    control: null,
-    interactive: null,
-  };
+  private channels: Record<DataChannelName, RTCDataChannel | null> = { bulk: null, control: null, interactive: null };
   private closed = false;
-  private initiator = false;
+  private leaving = false;
   private peer: RTCPeerConnection | null = null;
-  private pendingSignals: SignalMessage[] = [];
+  private peerGeneration = 0;
+  private peerRestarting = false;
+  private connectedNotified = false;
+  private pendingSignals: V2Signal[] = [];
+  private signalFlushPromise: Promise<void> | null = null;
+  private negotiationPromise: Promise<void> | null = null;
   private remoteParticipantJoined = false;
-  private icePreparationListener: IcePreparationListener | null = null;
-  private progress = initialProgress();
-  private readyForPeerConnection = false;
+  private remoteSlotId: string | null = null;
+  private remotePeerSessionId: string | null = null;
+  private initiator = false;
+  private slotId: string | null = null;
+  private peerSessionId: string | null = null;
+  private offererSlotId: string | null = null;
+  private epoch = 0;
+  private resumeToken: string | null;
   private selectedServers: RTCIceServer[] = [];
+  private readyForPeerConnection = false;
+  private icePreparationListener: IcePreparationListener | null = null;
+  private icePreparationPromise: Promise<void> | null = null;
   private socket: WebSocket | null = null;
-  private socketPingStartedAt: number | null = null;
-  private socketPingTimer: number | undefined;
-  private socketPingTimeout: number | undefined;
+  private socketGeneration = 0;
+  private socketMode: V2HelloMode = "new";
+  private reconnectMode: V2HelloMode = "new";
+  private reconnectAttempt = 0;
+  private reconnectTimer: number | undefined;
+  private heartbeatTimer: number | undefined;
+  private heartbeatStartedAt: number | null = null;
+  private heartbeatMisses = 0;
+  private leaveAckTimer: number | undefined;
+  private progress = initialProgress();
   private dataChannelPingStartedAt: number | null = null;
   private dataChannelPingTimer: number | undefined;
   private dataChannelPingTimeout: number | undefined;
   private receivedBytes = 0;
-  private receivedChatIds = new Set<string>();
   private sentBytes = 0;
+  private receivedChatIds = new Set<string>();
   private fileTransferManager: FileTransferManager | null = null;
   private mediaTransport: MediaTransport;
 
@@ -515,7 +599,9 @@ export class NativeWebRTCSession {
     private readonly onInteractiveMessage: (message: InteractiveMessage) => void,
     private readonly onChatReceipt: (id: string, status: ChatReceiptStatus) => void,
     private readonly onChatTyping: () => void,
+    private readonly onStatus: (status: SessionStatus) => void = () => undefined,
   ) {
+    this.resumeToken = v2ReadResumeToken(roomId);
     this.mediaTransport = new MediaTransport(
       (message) => this.sendControlMessage(message),
       undefined,
@@ -524,51 +610,72 @@ export class NativeWebRTCSession {
   }
 
   connect(): void {
-    this.setStep("websocket", { state: "checking", detail: "Opening signaling socket" });
-    this.socket = new WebSocket(websocketUrl(this.roomId));
-    this.socket.addEventListener("open", () => {
-      this.startSocketLatencyProbe();
-      void this.prepareIceServers();
-    });
-    this.socket.addEventListener("message", (event) => this.handleSocketMessage(String(event.data)));
-    this.socket.addEventListener("error", () => this.fail("The signaling WebSocket could not be opened."));
-    this.socket.addEventListener("close", () => {
-      this.stopSocketLatencyProbe();
-      if (!this.closed && this.progress.dataChannel.state !== "active") {
-        this.setStep("websocket", { state: "error", detail: "Signaling socket closed" });
-      }
-    });
+    if (this.closed) return;
+    this.onStatus({ detail: "Opening signaling socket", state: "connecting" });
+    void this.prepareIceServers();
+    this.openSocket(this.resumeToken ? "resume-signaling" : "new", true);
   }
 
-  close(): void {
+  /** Best effort pagehide shutdown; keep the token so a bfcache/new tab can resume. */
+  suspend(): void {
+    if (this.closed) return;
     this.closed = true;
+    this.stopHeartbeat();
+    this.stopDataChannelLatencyProbe();
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.sendSocket({ type: "suspend" });
+      this.socket.close(1_000, "Page hidden");
+    } else this.socket?.close();
+  }
+
+  /** Explicit leave releases the seat and clears the tab-local resume token. */
+  close(): void {
+    if (this.leaving) return;
+    if (this.closed && !this.socket) return;
+    this.closed = true;
+    this.leaving = true;
+    this.onStatus({ state: "closed" });
+    this.clearReconnectTimer();
+    this.stopHeartbeat();
+    this.stopDataChannelLatencyProbe();
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.sendSocket({ type: "leave" });
+      this.leaveAckTimer = window.setTimeout(() => this.finishClose(), 500);
+    } else {
+      this.finishClose();
+    }
+  }
+
+  private finishClose(): void {
+    if (this.leaveAckTimer !== undefined) {
+      window.clearTimeout(this.leaveAckTimer);
+      this.leaveAckTimer = undefined;
+    }
     if (this.icePreparationListener) {
       stopObservingIceServers(this.icePreparationListener);
       this.icePreparationListener = null;
     }
-    this.stopSocketLatencyProbe();
+    this.stopHeartbeat();
     this.stopDataChannelLatencyProbe();
     this.closeDataChannels();
     this.mediaTransport.dispose();
     this.peer?.close();
-    this.socket?.close();
+    this.peer = null;
+    this.socket?.close(1_000, "Leaving room");
+    this.socket = null;
+    this.leaving = false;
+    this.resumeToken = null;
+    v2WriteResumeToken(this.roomId, null);
   }
 
-  send(data: string | ArrayBuffer | Blob): boolean {
-    return this.sendOnChannel("interactive", data);
-  }
-
-  sendBulk(data: string | ArrayBuffer | Blob): boolean {
-    return this.sendOnChannel("bulk", data);
-  }
-
+  send(data: string | ArrayBuffer | Blob): boolean { return this.sendOnChannel("interactive", data); }
+  sendBulk(data: string | ArrayBuffer | Blob): boolean { return this.sendOnChannel("bulk", data); }
   sendControlMessage(message: { type: string; [key: string]: unknown }): boolean {
     return this.sendOnChannel("control", JSON.stringify(message));
   }
-
-  attachFileTransferManager(manager: FileTransferManager | null): void {
-    this.fileTransferManager = manager;
-  }
+  attachFileTransferManager(manager: FileTransferManager | null): void { this.fileTransferManager = manager; }
+  get dataChannel(): RTCDataChannel | null { return this.channels.interactive; }
+  get media(): MediaTransport { return this.mediaTransport; }
 
   sendChatMessage(id: string, text: string): boolean {
     const message = text.trim();
@@ -583,21 +690,12 @@ export class NativeWebRTCSession {
     try {
       if (typeof data === "string") channel.send(data);
       else if (data instanceof Blob) channel.send(data);
-      else channel.send(data);
-    } catch {
-      return false;
-    }
+      else if (data instanceof ArrayBuffer) channel.send(data);
+      else channel.send(data as any);
+    } catch { return false; }
     this.sentBytes += dataSize(data);
     this.updateDataTransferProgress();
     return true;
-  }
-
-  get dataChannel(): RTCDataChannel | null {
-    return this.channels.interactive;
-  }
-
-  get media(): MediaTransport {
-    return this.mediaTransport;
   }
 
   async getTransportDiagnostics(): Promise<WebRTCTransportDiagnostics> {
@@ -607,30 +705,17 @@ export class NativeWebRTCSession {
       interactive: this.channels.interactive?.readyState === "open" ? this.channels.interactive.bufferedAmount : null,
     };
     const fallback = {
-      availableOutgoingBitrate: null,
-      bufferedAmount,
-      bytesReceived: null,
-      bytesSent: null,
-      currentRoundTripTime: null,
-      localCandidateType: null,
-      localProtocol: null,
-      packetsRetransmitted: null,
-      packetsDiscardedOnSend: null,
-      remoteCandidateType: null,
-      remoteProtocol: null,
-      relayProtocol: null,
-      sctpCongestionWindow: null,
-      sctpReceiverWindow: null,
-      sctpSmoothedRoundTripTime: null,
-      sctpState: null,
+      availableOutgoingBitrate: null, bufferedAmount, bytesReceived: null, bytesSent: null,
+      currentRoundTripTime: null, localCandidateType: null, localProtocol: null,
+      packetsRetransmitted: null, packetsDiscardedOnSend: null, remoteCandidateType: null,
+      remoteProtocol: null, relayProtocol: null, sctpCongestionWindow: null,
+      sctpReceiverWindow: null, sctpSmoothedRoundTripTime: null, sctpState: null,
     } satisfies WebRTCTransportDiagnostics;
     if (!this.peer) return fallback;
-
     try {
       const stats = await this.peer.getStats();
       for (const report of stats.values()) {
-        if (report.type !== "candidate-pair" || report.state !== "succeeded") continue;
-        if (report.selected !== true && report.nominated !== true) continue;
+        if (report.type !== "candidate-pair" || report.state !== "succeeded" || (report.selected !== true && report.nominated !== true)) continue;
         const local = report.localCandidateId ? stats.get(report.localCandidateId) : undefined;
         const remote = report.remoteCandidateId ? stats.get(report.remoteCandidateId) : undefined;
         const sctp = [...stats.values()].find((entry) => entry.type === "sctp");
@@ -653,420 +738,440 @@ export class NativeWebRTCSession {
           sctpState: typeof sctp?.state === "string" ? sctp.state : null,
         };
       }
-    } catch {
-      // The diagnostics view remains useful even if this browser withholds stats.
-    }
+    } catch { /* stats are optional */ }
     return fallback;
   }
 
   private async prepareIceServers(): Promise<void> {
-    const listener: IcePreparationListener = (step, status) => this.setStep(step, status);
-    this.icePreparationListener = listener;
-    const preparation = await prepareIceServersForConnection(listener);
-    this.selectedServers = preparation.servers;
+    if (this.icePreparationPromise) return this.icePreparationPromise;
+    this.icePreparationPromise = (async () => {
+      const listener: IcePreparationListener = (step, status) => this.setStep(step, status);
+      this.icePreparationListener = listener;
+      try { this.selectedServers = (await prepareIceServersForConnection(listener)).servers; } catch { this.selectedServers = []; }
+      if (this.closed) return;
+      this.readyForPeerConnection = true;
+      if (!this.remoteParticipantJoined) this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
+      await this.flushSignals();
+      if (this.remoteParticipantJoined && this.initiator && !this.peer) await this.createOffer();
+    })();
+    return this.icePreparationPromise;
+  }
 
-    this.readyForPeerConnection = true;
-    this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
-    await this.flushSignals();
-    if (this.remoteParticipantJoined) await this.createOffer();
+  private openSocket(mode: V2HelloMode, resetBackoff = false): void {
+    if (this.closed) return;
+    this.clearReconnectTimer();
+    if (resetBackoff) this.reconnectAttempt = 0;
+    const previous = this.socket;
+    if (previous && previous.readyState !== WebSocket.CLOSED) {
+      previous.onopen = null; previous.onmessage = null; previous.onerror = null; previous.onclose = null;
+      previous.close(1_000, "Replacing signaling socket");
+    }
+    this.socketMode = mode;
+    this.reconnectMode = mode;
+    this.heartbeatMisses = 0;
+    this.heartbeatStartedAt = null;
+    const generation = ++this.socketGeneration;
+    this.setStep("websocket", { state: "checking", detail: "Opening signaling socket" });
+    try {
+      const socket = new WebSocket(websocketUrl(this.roomId));
+      this.socket = socket;
+      socket.onopen = () => {
+        if (generation !== this.socketGeneration || this.closed) return;
+        this.setStep("websocket", { state: "active", detail: "Signaling socket connected" });
+        this.startHeartbeat(generation);
+        const token = mode === "new" ? undefined : this.resumeToken ?? undefined;
+        this.sendSocket({ type: "hello", mode, ...(token ? { resumeToken: token } : {}) });
+        void this.prepareIceServers();
+      };
+      socket.onmessage = (event) => { if (generation === this.socketGeneration) this.handleSocketMessage(String(event.data)); };
+      socket.onerror = () => {
+        if (generation !== this.socketGeneration || this.closed) return;
+        this.setStep("websocket", { state: "error", detail: "The signaling WebSocket could not be opened." });
+      };
+      socket.onclose = () => {
+        if (generation !== this.socketGeneration) return;
+        this.stopHeartbeat(); this.socket = null;
+        if (this.closed) return;
+        this.setStep("websocket", { state: "checking", detail: "Signaling socket closed" });
+        this.scheduleSocketReconnect(this.reconnectMode);
+      };
+    } catch { this.scheduleSocketReconnect(mode); }
   }
 
   private handleSocketMessage(rawMessage: string): void {
     let message: ServerMessage;
-    try {
-      message = JSON.parse(rawMessage) as ServerMessage;
-    } catch {
-      return;
-    }
-
+    try { message = JSON.parse(rawMessage) as ServerMessage; } catch { return; }
     if (message.type === "welcome") {
-      this.initiator = message.isInitiator;
+      const oldEpoch = this.epoch;
+      this.slotId = message.slotId ?? message.peerId ?? this.slotId;
+      this.peerSessionId = message.peerSessionId ?? this.peerSessionId;
+      this.offererSlotId = message.offererSlotId ?? this.offererSlotId;
+      const epoch = v2Epoch(message.epoch);
+      if (epoch !== undefined && epoch !== this.epoch) { this.epoch = epoch; this.pendingSignals = []; }
+      if (typeof message.resumeToken === "string" && message.resumeToken.length <= 512) {
+        this.resumeToken = message.resumeToken; v2WriteResumeToken(this.roomId, message.resumeToken);
+      }
+      this.initiator = message.offererSlotId ? message.offererSlotId === this.slotId : message.isInitiator;
+      this.remoteParticipantJoined = message.peerCount > 1 || this.remoteParticipantJoined;
+      if (this.socketMode === "restart-peer" && oldEpoch !== 0 && this.epoch !== oldEpoch) this.resetPeerForNegotiation();
+      this.reconnectAttempt = 0;
       this.setStep("websocket", { state: "active", detail: "Signaling socket connected" });
-      if (!this.initiator) this.setStep("p2p", { state: "pending", detail: "Waiting for connection offer" });
-      return;
-    }
-
-    if (message.type === "pong") {
-      if (this.socketPingStartedAt === null) return;
-      const latency = Math.round(performance.now() - this.socketPingStartedAt);
-      this.socketPingStartedAt = null;
-      if (this.socketPingTimeout !== undefined) {
-        window.clearTimeout(this.socketPingTimeout);
-        this.socketPingTimeout = undefined;
+      this.onStatus({ detail: "Signaling socket connected", state: "connected" });
+      if (!this.initiator && !this.peer) this.setStep("p2p", { state: "pending", detail: "Waiting for connection offer" });
+      // A full page refresh can resume the signaling lease without retaining
+      // the old RTCPeerConnection. Ask the room to rotate the peer session so
+      // both sides receive a fresh negotiate event.
+      if (message.resumed && message.peerCount > 1 && !this.peer && this.socketMode === "resume-signaling") {
+        this.openSocket("restart-peer");
+        return;
       }
-      this.setStep("websocket", {
-        state: "active",
-        detail: "Signaling socket connected",
-        latency,
-      });
-      return;
-    }
-
-    if (message.type === "peer-ready") {
-      this.remoteParticipantJoined = true;
-      if (!this.readyForPeerConnection) {
-        this.setStep("p2p", { state: "checking", detail: "Peer joined, preparing P2P connection" });
-      }
-      void this.createOffer();
-      return;
-    }
-
-    if (message.type === "signal") {
-      this.pendingSignals.push(message);
       void this.flushSignals();
+      if (this.remoteParticipantJoined && this.initiator && this.readyForPeerConnection && !this.peer) void this.createOffer();
       return;
     }
-
-    if (message.type === "peer-left") {
-      this.remoteParticipantJoined = false;
+    if (message.type === "pong") {
+      if (this.heartbeatStartedAt === null) return;
+      const latency = Math.round(performance.now() - this.heartbeatStartedAt);
+      this.heartbeatStartedAt = null; this.heartbeatMisses = 0;
+      this.setStep("websocket", { state: "active", detail: "Signaling socket connected", latency });
+      return;
+    }
+    if (message.type === "left") { if (this.leaving) this.finishClose(); return; }
+    if (message.type === "peer-ready" || message.type === "negotiate") {
+      this.updateRemoteMetadata(message);
+      this.remoteParticipantJoined = true;
+      if (message.type === "negotiate") this.resetPeerForNegotiation();
+      if (!this.readyForPeerConnection) this.setStep("p2p", { state: "checking", detail: "Peer joined, preparing P2P connection" });
+      // `peer-ready` is an admission hint. The worker follows it with a
+      // recipient-relative `negotiate` event; waiting for that event avoids
+      // creating an offer that is immediately invalidated by the new epoch.
+      if (message.type === "negotiate" && this.initiator && this.readyForPeerConnection && !this.peer) void this.createOffer();
+      return;
+    }
+    if (message.type === "peer-disconnected" || message.type === "peer-reconnected") {
+      this.updateRemoteMetadata(message as unknown as { epoch?: number; peerId?: string; peerSessionId?: string; slotId?: string; offererSlotId?: string });
+      if (message.type === "peer-disconnected") {
+        // Keep the P2P transport alive while the remote signaling lease is
+        // within its grace period; the room will emit peer-left on expiry.
+        this.onStatus({ detail: "Waiting for the other participant to reconnect", state: "reconnecting" });
+      } else {
+        this.remoteParticipantJoined = true;
+        this.onStatus({ detail: "Signaling socket connected", state: "connected" });
+        if (!this.peer && this.readyForPeerConnection) this.requestPeerRestart();
+      }
+      return;
+    }
+    if (message.type === "replaced") {
+      this.closed = true;
+      this.stopHeartbeat();
       this.stopDataChannelLatencyProbe();
-      this.useConnectingSocketLatencyInterval();
-      this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
-      this.setStep("dataChannel", { channels: 0, state: "pending", detail: "Waiting for data channel", transferred: this.dataTransfer() });
       this.closeDataChannels();
-      this.mediaTransport.stopLocalTracks();
       this.mediaTransport.detachPeer();
       this.peer?.close();
       this.peer = null;
-      this.onPeerLeft();
+      this.socket?.close(1_000, "Connection replaced");
+      this.socket = null;
+      this.onStatus({ detail: "Signaling connection replaced", state: "closed" });
       return;
     }
-
+    if (message.type === "signal") {
+      const signal = message as V2Signal;
+      signal.fromSlotId ??= signal.from ?? signal.peerId;
+      if (!this.acceptSignal(signal)) return;
+      this.pendingSignals.push(signal); void this.flushSignals(); return;
+    }
+    if (message.type === "peer-left") {
+      if (message.peerSessionId && this.remotePeerSessionId && message.peerSessionId !== this.remotePeerSessionId) return;
+      this.remoteParticipantJoined = false; this.remoteSlotId = null; this.remotePeerSessionId = null;
+      this.stopDataChannelLatencyProbe(); this.closeDataChannels(); this.mediaTransport.detachPeer();
+      this.peer?.close(); this.peer = null; this.peerRestarting = false; this.connectedNotified = false;
+      this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
+      this.setStep("dataChannel", { channels: 0, state: "pending", detail: "Waiting for data channel", transferred: this.dataTransfer() });
+      this.onPeerLeft(); return;
+    }
     if (message.type === "error") {
-      if (message.code === "room-full") {
-        this.onRoomFull();
-        return;
+      if (message.code === "room-full") { this.clearReconnectTimer(); this.onRoomFull(); return; }
+      if (message.code === "room-reserved") {
+        this.setStep("websocket", { state: "checking", detail: "Room temporarily reserved; retrying automatically" });
+        this.onStatus({ detail: "Room temporarily reserved; retrying automatically", retryAfterMs: message.retryAfterMs, state: "reserved" });
+        this.scheduleReservedRetry(message.retryAfterMs); return;
+      }
+      if (message.code === "resume-invalid") {
+        this.resumeToken = null; v2WriteResumeToken(this.roomId, null); this.scheduleSocketReconnect("new", true); return;
       }
       this.fail(message.message);
     }
   }
 
+  private updateRemoteMetadata(message: { epoch?: number; peerId?: string; peerSessionId?: string; slotId?: string; offererSlotId?: string; peers?: Array<{ slotId?: string; peerSessionId?: string }> }): void {
+    const epoch = v2Epoch(message.epoch);
+    if (epoch !== undefined && epoch !== this.epoch) { this.epoch = epoch; this.pendingSignals = []; }
+    const announcedSlotId = message.slotId ?? message.peerId;
+    const announcedPeerSessionId = message.peerSessionId;
+    const peerFromList = message.peers?.find((peer) => peer.slotId && peer.slotId !== this.slotId);
+    if (announcedSlotId && announcedSlotId !== this.slotId) {
+      this.remoteSlotId = announcedSlotId;
+      this.remotePeerSessionId = announcedPeerSessionId ?? this.remotePeerSessionId;
+    } else if (peerFromList?.slotId) {
+      this.remoteSlotId = peerFromList.slotId;
+      this.remotePeerSessionId = peerFromList.peerSessionId ?? this.remotePeerSessionId;
+    }
+    if (message.offererSlotId) { this.offererSlotId = message.offererSlotId; this.initiator = this.offererSlotId === this.slotId; }
+  }
+
+  private acceptSignal(signal: V2Signal): boolean {
+    const epoch = v2Epoch(signal.epoch);
+    if (epoch !== undefined && this.epoch !== 0 && epoch !== this.epoch) return false;
+    if (signal.fromSlotId && this.remoteSlotId && signal.fromSlotId !== this.remoteSlotId) return false;
+    if (signal.peerSessionId && this.remotePeerSessionId && signal.peerSessionId !== this.remotePeerSessionId) return false;
+    if (epoch !== undefined && this.epoch === 0) this.epoch = epoch;
+    if (signal.fromSlotId) this.remoteSlotId = signal.fromSlotId;
+    if (signal.peerSessionId) this.remotePeerSessionId = signal.peerSessionId;
+    return true;
+  }
+
   private async createOffer(): Promise<void> {
-    if (!this.readyForPeerConnection || this.peer || this.closed) return;
+    if (!this.readyForPeerConnection || !this.remoteParticipantJoined || !this.initiator || this.closed || this.peer || this.negotiationPromise) return;
+    this.negotiationPromise = this.performCreateOffer().finally(() => { this.negotiationPromise = null; });
+    await this.negotiationPromise;
+  }
+
+  private async performCreateOffer(): Promise<void> {
     const peer = this.createPeerConnection();
     this.mediaTransport.prepareOffer(peer);
-    for (const channelName of DATA_CHANNEL_NAMES) {
-      this.attachDataChannel(peer.createDataChannel(channelName, { ordered: channelName !== "bulk" }));
-    }
+    for (const name of DATA_CHANNEL_NAMES) this.attachDataChannel(peer.createDataChannel(name, { ordered: name !== "bulk" }));
     this.setStep("p2p", { state: "checking", detail: "Creating P2P offer" });
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(offer);
-    this.sendSignal({ description: offer });
+    try {
+      const offer = await peer.createOffer();
+      if (this.closed || this.peer !== peer) return;
+      await peer.setLocalDescription(offer);
+      if (this.closed || this.peer !== peer) return;
+      this.sendSignal({ description: offer });
+    } catch { if (!this.closed && this.peer === peer) this.requestPeerRestart(); }
   }
 
   private createPeerConnection(): RTCPeerConnection {
     const peer = new RTCPeerConnection({ iceServers: this.selectedServers });
+    const generation = ++this.peerGeneration;
     this.peer = peer;
-    peer.onicecandidate = ({ candidate }) => {
-      if (candidate) this.sendSignal({ candidate: asCandidate(candidate) });
-    };
-    peer.ontrack = (event) => this.mediaTransport.handleRemoteTrack(event);
+    peer.onicecandidate = ({ candidate }) => { if (candidate && this.peer === peer && generation === this.peerGeneration) this.sendSignal({ candidate: asCandidate(candidate) }); };
+    peer.ontrack = (event) => { if (this.peer === peer && generation === this.peerGeneration) this.mediaTransport.handleRemoteTrack(event); };
     peer.onconnectionstatechange = () => {
-      if (peer.connectionState === "failed") this.fail("P2P connection failed.");
-      if (peer.connectionState === "connected") {
-        this.setStep("p2p", { state: "active", detail: "P2P connection established" });
-        void this.detectConnectionRoute(peer);
-      }
+      if (this.peer !== peer || generation !== this.peerGeneration || this.closed) return;
+      if (peer.connectionState === "failed") this.requestPeerRestart();
+      if (peer.connectionState === "connected") { this.setStep("p2p", { state: "active", detail: "P2P connection established" }); void this.detectConnectionRoute(peer); }
     };
-    peer.ondatachannel = ({ channel }) => this.attachDataChannel(channel);
+    peer.ondatachannel = ({ channel }) => { if (this.peer === peer && generation === this.peerGeneration) this.attachDataChannel(channel); };
     return peer;
   }
 
   private async flushSignals(): Promise<void> {
     if (!this.readyForPeerConnection || this.closed) return;
-    while (this.pendingSignals.length) {
+    if (this.signalFlushPromise) return this.signalFlushPromise;
+    this.signalFlushPromise = this.flushSignalsInternal().finally(() => { this.signalFlushPromise = null; });
+    return this.signalFlushPromise;
+  }
+
+  private async flushSignalsInternal(): Promise<void> {
+    while (this.pendingSignals.length && !this.closed) {
       const signal = this.pendingSignals.shift();
       if (!signal?.payload) continue;
       const { candidate, description } = signal.payload;
-
-      if (description) {
-        const peer = this.peer ?? this.createPeerConnection();
-        await peer.setRemoteDescription(description);
-        if (description.type === "offer") {
-          this.mediaTransport.bindIncomingPeer(peer);
-          this.setStep("p2p", { state: "checking", detail: "Accepting P2P offer" });
-          const answer = await peer.createAnswer();
-          await peer.setLocalDescription(answer);
-          this.sendSignal({ description: answer });
+      try {
+        if (description) {
+          const peer = this.peer ?? this.createPeerConnection();
+          if (description.type === "offer" && peer.signalingState === "have-local-offer") await peer.setLocalDescription({ type: "rollback" });
+          await peer.setRemoteDescription(description);
+          if (description.type === "offer") {
+            this.mediaTransport.bindIncomingPeer(peer);
+            this.setStep("p2p", { state: "checking", detail: "Accepting P2P offer" });
+            const answer = await peer.createAnswer(); await peer.setLocalDescription(answer); this.sendSignal({ description: answer });
+          }
         }
-      }
-
-      if (candidate) {
-        const peer = this.peer;
-        if (peer?.remoteDescription) await peer.addIceCandidate(candidate);
-        else {
-          this.pendingSignals.unshift(signal);
-          return;
+        if (candidate) {
+          const peer = this.peer;
+          if (peer?.remoteDescription) await peer.addIceCandidate(candidate);
+          else { this.pendingSignals.unshift(signal); return; }
         }
-      }
+      } catch { if (!this.closed) this.requestPeerRestart(); return; }
     }
   }
 
   private attachDataChannel(channel: RTCDataChannel): void {
-    if (!isDataChannelName(channel.label)) {
-      channel.close();
-      return;
-    }
-
-    const channelName = channel.label;
-    this.channels[channelName] = channel;
-    this.updateDataChannelProgress();
-    channel.binaryType = "arraybuffer";
+    if (!isDataChannelName(channel.label)) { channel.close(); return; }
+    const name = channel.label;
+    const previous = this.channels[name];
+    if (previous && previous !== channel) { previous.onclose = null; previous.onerror = null; previous.close(); }
+    this.channels[name] = channel; channel.binaryType = "arraybuffer"; this.updateDataChannelProgress();
     channel.onopen = () => {
-      this.updateDataChannelProgress();
-      if (channelName === "control") this.startDataChannelLatencyProbe();
-      if (this.openDataChannelCount() === DATA_CHANNEL_COUNT) {
-        this.useConnectedSocketLatencyInterval();
-        this.onConnected(this);
+      if (this.channels[name] !== channel || this.closed) return;
+      this.updateDataChannelProgress(); if (name === "control") this.startDataChannelLatencyProbe();
+      if (this.openDataChannelCount() === DATA_CHANNEL_COUNT && !this.connectedNotified) {
+        this.connectedNotified = true; this.peerRestarting = false; this.onStatus({ detail: "Peer-to-peer connection established", state: "connected" }); this.onConnected(this);
       }
       if (this.peer) void this.detectConnectionRoute(this.peer);
     };
     channel.onmessage = (event) => {
-      this.receivedBytes += dataSize(event.data);
-      this.updateDataTransferProgress();
-      if (channelName === "control") this.handleDataChannelMessage(event.data);
-      if (channelName === "interactive") this.handleInteractiveMessage(event.data);
-      if (channelName === "bulk" && event.data instanceof ArrayBuffer) this.fileTransferManager?.handleSegment(event.data);
+      if (this.channels[name] !== channel) return;
+      this.receivedBytes += dataSize(event.data); this.updateDataTransferProgress();
+      if (name === "control") this.handleDataChannelMessage(event.data);
+      if (name === "interactive") this.handleInteractiveMessage(event.data);
+      if (name === "bulk" && event.data instanceof ArrayBuffer) this.fileTransferManager?.handleSegment(event.data);
     };
-    channel.onclose = () => this.handlePeerDisconnect();
-    channel.onerror = () => this.handlePeerDisconnect();
+    channel.onclose = () => { if (this.channels[name] === channel) this.requestPeerRestart(); };
+    channel.onerror = () => { if (this.channels[name] === channel) this.requestPeerRestart(); };
   }
 
-  private handlePeerDisconnect(): void {
-    if (this.closed) return;
+  /** Clears the current peer transport while retaining local capture tracks and application state. */
+  private resetPeerForNegotiation(): void {
+    this.connectedNotified = false;
     this.stopDataChannelLatencyProbe();
-    this.useConnectingSocketLatencyInterval();
-    this.remoteParticipantJoined = false;
-    this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
-    this.setStep("dataChannel", { channels: 0, state: "pending", detail: "Waiting for data channel", transferred: this.dataTransfer() });
     this.closeDataChannels();
-    this.mediaTransport.stopLocalTracks();
     this.mediaTransport.detachPeer();
     const peer = this.peer;
     this.peer = null;
     peer?.close();
-    this.onError("Data channel failed.");
-    this.onPeerLeft();
+    this.pendingSignals = [];
+    this.setStep("p2p", { state: "checking", detail: "Reconnecting peer-to-peer connection" });
+    this.setStep("dataChannel", { channels: 0, state: "checking", detail: "Reconnecting data channels", transferred: this.dataTransfer() });
   }
 
-  /** Reports the actual selected ICE path, not merely whether TURN credentials exist. */
-  private async detectConnectionRoute(peer: RTCPeerConnection): Promise<void> {
+  private requestPeerRestart(): void {
+    if (this.closed || this.peerRestarting || !this.remoteParticipantJoined) return;
+    this.peerRestarting = true; this.connectedNotified = false; this.stopDataChannelLatencyProbe(); this.closeDataChannels();
+    this.mediaTransport.detachPeer(); const peer = this.peer; this.peer = null; peer?.close();
+    this.setStep("p2p", { state: "checking", detail: "Reconnecting peer-to-peer connection" });
+    this.setStep("dataChannel", { channels: 0, state: "checking", detail: "Reconnecting data channels", transferred: this.dataTransfer() });
+    this.onStatus({ detail: "Reconnecting peer-to-peer connection", state: "reconnecting" }); this.openSocket("restart-peer");
+  }
+
+  private detectConnectionRoute = async (peer: RTCPeerConnection): Promise<void> => {
     try {
       const stats = await peer.getStats();
       for (const report of stats.values()) {
-        if (report.type !== "candidate-pair" || report.state !== "succeeded") continue;
-        if (report.selected !== true && report.nominated !== true) continue;
-
-        const localCandidate = report.localCandidateId ? stats.get(report.localCandidateId) : undefined;
-        const route = localCandidate?.candidateType === "relay" ? "relay" : "direct";
-        this.fileTransferManager?.setConnectionRoute(route);
-        this.onConnectionRoute(route);
-        return;
+        if (report.type !== "candidate-pair" || report.state !== "succeeded" || (report.selected !== true && report.nominated !== true)) continue;
+        const local = report.localCandidateId ? stats.get(report.localCandidateId) : undefined;
+        const route: ConnectionRoute = local?.candidateType === "relay" ? "relay" : "direct";
+        this.fileTransferManager?.setConnectionRoute(route); this.onConnectionRoute(route); return;
       }
-    } catch {
-      // Keep the direct label when the browser does not expose candidate statistics.
-    }
-  }
+    } catch { /* stats are optional */ }
+  };
 
   private sendSignal(payload: SignalMessage["payload"]): void {
-    this.sendSocket({ type: "signal", payload });
+    this.sendSocket({ type: "signal", epoch: this.epoch, fromSlotId: this.slotId ?? undefined, peerSessionId: this.peerSessionId ?? undefined, payload });
   }
 
-  private startSocketLatencyProbe(): void {
-    this.measureSocketLatency();
-    this.setSocketLatencyInterval(5_000);
+  private startHeartbeat(generation: number): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = window.setInterval(() => {
+      if (this.closed || generation !== this.socketGeneration || this.socket?.readyState !== WebSocket.OPEN) return;
+      if (this.heartbeatStartedAt !== null) {
+        this.heartbeatMisses += 1;
+        if (this.heartbeatMisses >= V2_MAX_HEARTBEAT_MISSES) { this.socket?.close(4_001, "Signaling heartbeat timeout"); return; }
+      }
+      this.heartbeatStartedAt = performance.now(); this.sendSocket({ type: "ping" });
+    }, V2_HEARTBEAT_INTERVAL);
   }
 
-  private useConnectingSocketLatencyInterval(): void {
-    this.setSocketLatencyInterval(5_000);
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== undefined) { window.clearInterval(this.heartbeatTimer); this.heartbeatTimer = undefined; }
+    this.heartbeatStartedAt = null; this.heartbeatMisses = 0;
   }
 
-  private useConnectedSocketLatencyInterval(): void {
-    this.setSocketLatencyInterval(30_000);
+  private scheduleSocketReconnect(mode: V2HelloMode, immediate = false): void {
+    if (this.closed || this.reconnectTimer !== undefined) return;
+    this.reconnectMode = mode;
+    const base = immediate ? 0 : V2_RECONNECT_DELAYS[Math.min(this.reconnectAttempt++, V2_RECONNECT_DELAYS.length - 1)];
+    const jitter = base ? Math.round(base * (Math.random() * 0.2 - 0.1)) : 0;
+    const delay = Math.max(0, base + jitter);
+    this.onStatus({ detail: "Reconnecting signaling socket", retryAfterMs: delay, state: "reconnecting" });
+    this.reconnectTimer = window.setTimeout(() => { this.reconnectTimer = undefined; this.openSocket(this.reconnectMode); }, delay);
   }
 
-  private setSocketLatencyInterval(interval: number): void {
-    if (this.socketPingTimer !== undefined) {
-      window.clearInterval(this.socketPingTimer);
-    }
-    this.socketPingTimer = window.setInterval(() => this.measureSocketLatency(), interval);
+  private scheduleReservedRetry(retryAfterMs?: number): void {
+    if (this.closed || this.reconnectTimer !== undefined) return;
+    const delay = Math.min(30_000, Math.max(250, Math.round(retryAfterMs ?? 1_000)));
+    this.reconnectMode = this.resumeToken ? "resume-signaling" : "new";
+    this.reconnectTimer = window.setTimeout(() => { this.reconnectTimer = undefined; this.openSocket(this.reconnectMode); }, delay);
   }
 
-  private stopSocketLatencyProbe(): void {
-    if (this.socketPingTimer !== undefined) {
-      window.clearInterval(this.socketPingTimer);
-      this.socketPingTimer = undefined;
-    }
-    if (this.socketPingTimeout !== undefined) {
-      window.clearTimeout(this.socketPingTimeout);
-      this.socketPingTimeout = undefined;
-    }
-    this.socketPingStartedAt = null;
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== undefined) { window.clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined; }
   }
 
-  private measureSocketLatency(): void {
-    if (
-      this.closed ||
-      this.socketPingStartedAt !== null ||
-      this.socket?.readyState !== WebSocket.OPEN
-    ) {
-      return;
-    }
-
-    this.socketPingStartedAt = performance.now();
-    this.sendSocket({ type: "ping" });
-    this.socketPingTimeout = window.setTimeout(() => {
-      this.socketPingStartedAt = null;
-      this.socketPingTimeout = undefined;
-    }, 5_000);
-  }
-
-  private sendSocket(message: object): void {
-    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
+  private sendSocket(message: object): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN) return false;
+    try { this.socket.send(JSON.stringify(message)); return true; } catch { return false; }
   }
 
   private handleDataChannelMessage(data: unknown): void {
     if (typeof data !== "string") return;
-
     let message: DataChannelControlMessage;
-    try {
-      message = JSON.parse(data) as DataChannelControlMessage;
-    } catch {
-      return;
-    }
-
+    try { message = JSON.parse(data) as DataChannelControlMessage; } catch { return; }
     this.fileTransferManager?.handleControl(message as unknown as { type: string; [key: string]: unknown });
     if (this.mediaTransport.handleControlMessage(message)) return;
-
     if (message.type === "chat-received" || message.type === "chat-read") {
-      if (typeof message.id === "string" && message.id.length > 0 && message.id.length <= 128) {
-        this.onChatReceipt(message.id, message.type === "chat-read" ? "read" : "received");
-      }
+      if (typeof message.id === "string" && message.id.length > 0 && message.id.length <= 128) this.onChatReceipt(message.id, message.type === "chat-read" ? "read" : "received");
       return;
     }
-
-    if (message.type === "chat-typing") {
-      this.onChatTyping();
-      return;
-    }
-
-    if (message.type === "zestsend-ping") {
-      this.sendDataChannelControl({ id: message.id, type: "zestsend-pong" });
-      return;
-    }
-
+    if (message.type === "chat-typing") { this.onChatTyping(); return; }
+    if (message.type === "zestsend-ping") { this.sendDataChannelControl({ id: message.id, type: "zestsend-pong" }); return; }
     const startedAt = this.dataChannelPingStartedAt;
     if (message.type !== "zestsend-pong" || startedAt === null || message.id !== String(startedAt)) return;
-
-    const latency = Math.round(performance.now() - startedAt);
     this.dataChannelPingStartedAt = null;
-    if (this.dataChannelPingTimeout !== undefined) {
-      window.clearTimeout(this.dataChannelPingTimeout);
-      this.dataChannelPingTimeout = undefined;
-    }
-    this.setStep("p2p", { state: "active", detail: "P2P connection established", latency });
+    if (this.dataChannelPingTimeout !== undefined) { window.clearTimeout(this.dataChannelPingTimeout); this.dataChannelPingTimeout = undefined; }
+    this.setStep("p2p", { state: "active", detail: "P2P connection established", latency: Math.round(performance.now() - startedAt) });
   }
 
   private handleInteractiveMessage(data: unknown): void {
     if (typeof data !== "string") return;
-
     try {
       const message = JSON.parse(data) as unknown;
-      if (isInteractiveMessage(message)) {
-        this.sendDataChannelControl({ id: message.id, type: "chat-received" });
-        if (this.receivedChatIds.has(message.id)) return;
-        this.receivedChatIds.add(message.id);
-        this.onInteractiveMessage(message);
-      }
-    } catch {
-      // Ignore malformed application messages without affecting the data channel.
-    }
+      if (!isInteractiveMessage(message)) return;
+      this.sendDataChannelControl({ id: message.id, type: "chat-received" });
+      if (this.receivedChatIds.has(message.id)) return;
+      this.receivedChatIds.add(message.id); this.onInteractiveMessage(message);
+    } catch { /* malformed application messages are ignored */ }
   }
 
   private startDataChannelLatencyProbe(): void {
-    this.measureDataChannelLatency();
+    this.stopDataChannelLatencyProbe(); this.measureDataChannelLatency();
     this.dataChannelPingTimer = window.setInterval(() => this.measureDataChannelLatency(), 5_000);
   }
-
   private stopDataChannelLatencyProbe(): void {
-    if (this.dataChannelPingTimer !== undefined) {
-      window.clearInterval(this.dataChannelPingTimer);
-      this.dataChannelPingTimer = undefined;
-    }
-    if (this.dataChannelPingTimeout !== undefined) {
-      window.clearTimeout(this.dataChannelPingTimeout);
-      this.dataChannelPingTimeout = undefined;
-    }
+    if (this.dataChannelPingTimer !== undefined) { window.clearInterval(this.dataChannelPingTimer); this.dataChannelPingTimer = undefined; }
+    if (this.dataChannelPingTimeout !== undefined) { window.clearTimeout(this.dataChannelPingTimeout); this.dataChannelPingTimeout = undefined; }
     this.dataChannelPingStartedAt = null;
   }
-
   private measureDataChannelLatency(): void {
     if (this.closed || this.dataChannelPingStartedAt !== null || this.channels.control?.readyState !== "open") return;
-
-    const startedAt = performance.now();
-    this.dataChannelPingStartedAt = startedAt;
+    const startedAt = performance.now(); this.dataChannelPingStartedAt = startedAt;
     this.sendDataChannelControl({ id: String(startedAt), type: "zestsend-ping" });
-    this.dataChannelPingTimeout = window.setTimeout(() => {
-      this.dataChannelPingStartedAt = null;
-      this.dataChannelPingTimeout = undefined;
-    }, 5_000);
+    this.dataChannelPingTimeout = window.setTimeout(() => { this.dataChannelPingStartedAt = null; this.dataChannelPingTimeout = undefined; }, 5_000);
   }
-
-  private sendDataChannelControl(message: DataChannelControlMessage): void {
-    this.sendOnChannel("control", JSON.stringify(message));
-  }
-
+  private sendDataChannelControl(message: DataChannelControlMessage): void { this.sendOnChannel("control", JSON.stringify(message)); }
   markChatMessageRead(id: string): boolean {
     if (!id || id.length > 128) return false;
     return this.sendOnChannel("control", JSON.stringify({ id, type: "chat-read" satisfies ChatReceiptMessage["type"] }));
   }
-
-  sendChatTyping(): boolean {
-    return this.sendOnChannel("control", JSON.stringify({ type: "chat-typing" satisfies ChatTypingMessage["type"] }));
-  }
-
-  private openDataChannelCount(): number {
-    return DATA_CHANNEL_NAMES.filter((channelName) => this.channels[channelName]?.readyState === "open").length;
-  }
-
+  sendChatTyping(): boolean { return this.sendOnChannel("control", JSON.stringify({ type: "chat-typing" satisfies ChatTypingMessage["type"] })); }
+  private openDataChannelCount(): number { return DATA_CHANNEL_NAMES.filter((name) => this.channels[name]?.readyState === "open").length; }
   private updateDataChannelProgress(): void {
     const channels = this.openDataChannelCount();
-    this.setStep("dataChannel", {
-      channels,
-      detail: channels === DATA_CHANNEL_COUNT ? "Data channels ready" : "Opening data channels",
-      state: channels === DATA_CHANNEL_COUNT ? "active" : "checking",
-      transferred: this.dataTransfer(),
-    });
+    this.setStep("dataChannel", { channels, detail: channels === DATA_CHANNEL_COUNT ? "Data channels ready" : "Opening data channels", state: channels === DATA_CHANNEL_COUNT ? "active" : "checking", transferred: this.dataTransfer() });
   }
-
-  private updateDataTransferProgress(): void {
-    this.setStep("dataChannel", { ...this.progress.dataChannel, transferred: this.dataTransfer() });
-  }
-
+  private updateDataTransferProgress(): void { this.setStep("dataChannel", { ...this.progress.dataChannel, transferred: this.dataTransfer() }); }
   private dataTransfer(): { received: number; sent: number } {
-    const traffic = this.mediaTransport.traffic;
-    return { received: this.receivedBytes + traffic.received, sent: this.sentBytes + traffic.sent };
+    const traffic = this.mediaTransport.traffic; return { received: this.receivedBytes + traffic.received, sent: this.sentBytes + traffic.sent };
   }
-
   private closeDataChannels(): void {
-    for (const channelName of DATA_CHANNEL_NAMES) {
-      const channel = this.channels[channelName];
-      if (!channel) continue;
-      channel.onclose = null;
-      channel.onerror = null;
-      channel.close();
-      this.channels[channelName] = null;
+    for (const name of DATA_CHANNEL_NAMES) {
+      const channel = this.channels[name]; if (!channel) continue;
+      channel.onclose = null; channel.onerror = null; channel.onopen = null; channel.onmessage = null;
+      try { channel.close(); } catch { /* already closed */ }
+      this.channels[name] = null;
     }
   }
-
-  private setStep(step: keyof ConnectionProgress, value: ConnectionStep): void {
-    this.progress = { ...this.progress, [step]: value };
-    this.onProgress(this.progress);
-  }
-
-  private fail(message: string): void {
-    if (this.closed) return;
-    this.setStep("p2p", { state: "error", detail: message });
-    this.onError(message);
-  }
+  private setStep(step: keyof ConnectionProgress, value: ConnectionStep): void { this.progress = { ...this.progress, [step]: value }; this.onProgress(this.progress); }
+  private fail(message: string): void { if (this.closed) return; this.setStep("p2p", { state: "error", detail: message }); this.onError(message); }
 }
