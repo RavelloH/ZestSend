@@ -381,6 +381,7 @@ export class Room extends DurableObject<Env> {
     const state = loaded.state;
     const expired = this.removeExpiredLeases(state, now);
     if (expired.length > 0) {
+      await this.saveState(state, true);
       for (const slot of expired) {
         this.broadcastToActive(state, {
           type: "peer-left",
@@ -390,6 +391,7 @@ export class Room extends DurableObject<Env> {
           peerSessionId: slot.peerSessionId,
         });
       }
+      await this.scheduleAlarm();
     }
 
     let mode = requestedMode;
