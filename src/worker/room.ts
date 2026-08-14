@@ -507,15 +507,7 @@ export class Room extends DurableObject<Env> {
         peerSessionId: slot.peerSessionId,
         offererSlotId: state.offererSlotId,
       }, socket);
-      this.broadcastToActive(state, {
-        type: "negotiate",
-        epoch: state.epoch,
-        slotId: slot.slotId,
-        peerId: slot.slotId,
-        peerSessionId: slot.peerSessionId,
-        offererSlotId: state.offererSlotId,
-        peers: activeSlots.map((candidate) => ({ slotId: candidate.slotId, peerSessionId: candidate.peerSessionId })),
-      });
+      this.sendNegotiation(state, activeSlots, slot.slotId);
     }
     return true;
   }
@@ -732,6 +724,26 @@ export class Room extends DurableObject<Env> {
       const attachment = attachmentFor(socket);
       if (!attachment?.slotId || !activeIds.has(`${attachment.slotId}:${attachment.connectionId}`)) continue;
       this.send(socket, payload);
+    }
+  }
+
+  /** Send recipient-relative metadata so each client treats the other seat as remote. */
+  private sendNegotiation(state: RoomState, activeSlots: SlotState[], changedSlotId: string): void {
+    const peers = activeSlots.map((candidate) => ({ slotId: candidate.slotId, peerSessionId: candidate.peerSessionId }));
+    for (const recipient of activeSlots) {
+      const remote = activeSlots.find((candidate) => candidate.slotId !== recipient.slotId);
+      const recipientSocket = this.socketForSlot(recipient);
+      if (!remote || !recipientSocket) continue;
+      this.send(recipientSocket, {
+        type: "negotiate",
+        epoch: state.epoch,
+        slotId: remote.slotId,
+        peerId: remote.slotId,
+        peerSessionId: remote.peerSessionId,
+        offererSlotId: state.offererSlotId,
+        changedSlotId,
+        peers,
+      });
     }
   }
 
