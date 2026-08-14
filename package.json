@@ -19,6 +19,15 @@
     "@number-flow/react": "^0.6.2",
     "@remixicon/react": "^4.9.0",
     "@tanstack/react-router": "^1.170.25",
+    "@tiptap/extension-character-count": "^3.30.0",
+    "@tiptap/extension-collaboration": "^3.30.0",
+    "@tiptap/extension-collaboration-caret": "^3.30.0",
+    "@tiptap/extension-link": "^3.30.0",
+    "@tiptap/extension-placeholder": "^3.30.0",
+    "@tiptap/extension-task-item": "^3.30.0",
+    "@tiptap/extension-task-list": "^3.30.0",
+    "@tiptap/react": "^3.30.0",
+    "@tiptap/starter-kit": "^3.30.0",
     "clsx": "^2.1.1",
     "cuid": "^3.0.0",
     "framer-motion": "^11.5.6",
@@ -27,7 +36,9 @@
     "overlayscrollbars": "^2.16.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "tailwind-merge": "^3.6.0"
+    "tailwind-merge": "^3.6.0",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.32"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.51.2",

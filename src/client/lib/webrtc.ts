@@ -86,9 +86,9 @@ export type InteractiveMessage = {
   type: "chat";
 };
 
-type DataChannelName = "bulk" | "control" | "interactive";
+type DataChannelName = "bulk" | "collaboration" | "control" | "interactive";
 
-const DATA_CHANNEL_NAMES: DataChannelName[] = ["control", "interactive", "bulk"];
+const DATA_CHANNEL_NAMES: DataChannelName[] = ["control", "interactive", "bulk", "collaboration"];
 const DATA_CHANNEL_COUNT = DATA_CHANNEL_NAMES.length;
 const textEncoder = new TextEncoder();
 
@@ -546,7 +546,9 @@ type V2Signal = SignalMessage & { from?: string; peerId?: string };
 
 /** WebRTC session with resumable signaling and peer renegotiation. */
 export class NativeWebRTCSession {
-  private channels: Record<DataChannelName, RTCDataChannel | null> = { bulk: null, control: null, interactive: null };
+  private channels: Record<DataChannelName, RTCDataChannel | null> = { bulk: null, collaboration: null, control: null, interactive: null };
+  private collaborationListeners = new Set<(data: ArrayBuffer) => void>();
+  private collaborationStatusListeners = new Set<(ready: boolean) => void>();
   private closed = false;
   private suspended = false;
   private leaving = false;
@@ -720,12 +722,25 @@ export class NativeWebRTCSession {
 
   send(data: string | ArrayBuffer | Blob): boolean { return this.sendOnChannel("interactive", data); }
   sendBulk(data: string | ArrayBuffer | Blob): boolean { return this.sendOnChannel("bulk", data); }
+  sendCollaboration(data: ArrayBuffer): boolean { return this.sendOnChannel("collaboration", data); }
   sendControlMessage(message: { type: string; [key: string]: unknown }): boolean {
     return this.sendOnChannel("control", JSON.stringify(message));
   }
   attachFileTransferManager(manager: FileTransferManager | null): void { this.fileTransferManager = manager; }
   get dataChannel(): RTCDataChannel | null { return this.channels.interactive; }
+  get collaborationReady(): boolean { return this.channels.collaboration?.readyState === "open"; }
   get media(): MediaTransport { return this.mediaTransport; }
+
+  subscribeCollaboration(listener: (data: ArrayBuffer) => void): () => void {
+    this.collaborationListeners.add(listener);
+    return () => this.collaborationListeners.delete(listener);
+  }
+
+  subscribeCollaborationStatus(listener: (ready: boolean) => void): () => void {
+    this.collaborationStatusListeners.add(listener);
+    listener(this.collaborationReady);
+    return () => this.collaborationStatusListeners.delete(listener);
+  }
 
   sendChatMessage(id: string, text: string): boolean {
     const message = text.trim();
@@ -751,6 +766,7 @@ export class NativeWebRTCSession {
   async getTransportDiagnostics(): Promise<WebRTCTransportDiagnostics> {
     const bufferedAmount: WebRTCTransportDiagnostics["bufferedAmount"] = {
       bulk: this.channels.bulk?.readyState === "open" ? this.channels.bulk.bufferedAmount : null,
+      collaboration: this.channels.collaboration?.readyState === "open" ? this.channels.collaboration.bufferedAmount : null,
       control: this.channels.control?.readyState === "open" ? this.channels.control.bufferedAmount : null,
       interactive: this.channels.interactive?.readyState === "open" ? this.channels.interactive.bufferedAmount : null,
     };
@@ -1143,6 +1159,7 @@ export class NativeWebRTCSession {
     channel.onopen = () => {
       if (this.channels[name] !== channel || this.closed || this.suspended) return;
       this.updateDataChannelProgress(); if (name === "control") this.startDataChannelLatencyProbe();
+      if (name === "collaboration") this.notifyCollaborationStatus(true);
       if (this.openDataChannelCount() === DATA_CHANNEL_COUNT && !this.connectedNotified) {
         this.connectedNotified = true; this.peerRestarting = false; this.onStatus({ detail: "Peer-to-peer connection established", state: "connected" }); this.onConnected(this);
       }
@@ -1154,9 +1171,20 @@ export class NativeWebRTCSession {
       if (name === "control") this.handleDataChannelMessage(event.data);
       if (name === "interactive") this.handleInteractiveMessage(event.data);
       if (name === "bulk" && event.data instanceof ArrayBuffer) this.fileTransferManager?.handleSegment(event.data);
+      if (name === "collaboration" && event.data instanceof ArrayBuffer) {
+        for (const listener of this.collaborationListeners) listener(event.data);
+      }
     };
-    channel.onclose = () => { if (this.channels[name] === channel) this.requestPeerRestart(); };
-    channel.onerror = () => { if (this.channels[name] === channel) this.requestPeerRestart(); };
+    channel.onclose = () => {
+      if (this.channels[name] !== channel) return;
+      if (name === "collaboration") this.notifyCollaborationStatus(false);
+      this.requestPeerRestart();
+    };
+    channel.onerror = () => {
+      if (this.channels[name] !== channel) return;
+      if (name === "collaboration") this.notifyCollaborationStatus(false);
+      this.requestPeerRestart();
+    };
   }
 
   /** Clears the current peer transport while retaining local capture tracks and application state. */
@@ -1314,12 +1342,17 @@ export class NativeWebRTCSession {
     const traffic = this.mediaTransport.traffic; return { received: this.receivedBytes + traffic.received, sent: this.sentBytes + traffic.sent };
   }
   private closeDataChannels(): void {
+    const collaborationWasReady = this.collaborationReady;
     for (const name of DATA_CHANNEL_NAMES) {
       const channel = this.channels[name]; if (!channel) continue;
       channel.onclose = null; channel.onerror = null; channel.onopen = null; channel.onmessage = null;
       try { channel.close(); } catch { /* already closed */ }
       this.channels[name] = null;
     }
+    if (collaborationWasReady) this.notifyCollaborationStatus(false);
+  }
+  private notifyCollaborationStatus(ready: boolean): void {
+    for (const listener of this.collaborationStatusListeners) listener(ready);
   }
   private setStep(step: keyof ConnectionProgress, value: ConnectionStep): void { this.progress = { ...this.progress, [step]: value }; this.onProgress(this.progress); }
   private fail(message: string): void { if (this.closed || this.suspended) return; this.setStep("p2p", { state: "error", detail: message }); this.onError(message); }

@@ -67,6 +67,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { type CSSProperties, type DragEventHandler, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import Layout from "../components/Layout";
+import { CollaborationWorkspace } from "../components/collaboration-editor";
 import { useTheme } from "../components/theme";
 import { AutoTransition } from "../components/ui/auto-transition";
 import { Clickable } from "../components/ui/clickable";
@@ -75,6 +76,7 @@ import { MagneticDock, type DockItemData } from "../components/ui/magnetic-dock"
 import { OverlayScrollbar } from "../components/ui/overlay-scrollbar";
 import { FileTransferManager, type FileTransferDiagnostics, type FileTransferSnapshot } from "../lib/file-transfer";
 import type { MediaTransport } from "../lib/media-transport";
+import { P2PCollaborationProvider } from "../lib/p2p-collaboration";
 import type { SharedPlaybackCommand, SharedPlaybackMessage } from "../lib/shared-playback";
 import {
   NativeWebRTCSession,
@@ -230,7 +232,7 @@ const workspaceCopy = {
     apps: {
       canvas: ["Canvas", "A shared place for sketches and marks."],
       chat: ["Chat", "Messages remain available while you work elsewhere."],
-      collaborate: ["Collaborate", "A shared Markdown document for the room."],
+      collaborate: ["Collaborate", "A shared document for the room."],
       files: ["Files", "Send files or let the other participant choose what to receive."],
       status: ["Connection status", "Live measurements for this private room."],
       video: ["Video", "Video calls and screen sharing share one media session."],
@@ -253,7 +255,7 @@ const workspaceCopy = {
     apps: {
       canvas: ["画板", "与对方共享涂鸦、笔记和标记。"],
       chat: ["聊天", "切换到其他功能时，消息仍会保持可用。"],
-      collaborate: ["协作", "在房间内共同编辑 Markdown 文档。"],
+      collaborate: ["协作", "在房间内共同编辑文档。"],
       files: ["文件", "发送文件，或让对方选择需要接收的文件。"],
       status: ["连接状态", "查看这个私密房间的实时连接测量。"],
       video: ["视频", "视频通话与屏幕共享使用同一媒体会话。"],
@@ -2281,6 +2283,8 @@ function FileWorkspace({ accent, files, locale, onAccept, onCancel, onDelete, on
 
 function RoomWorkspace({
   chatMessages,
+  collaborationProvider,
+  collaborationPeerCursor,
   fileTransfers,
   locale,
   onExitComplete,
@@ -2336,6 +2340,8 @@ function RoomWorkspace({
   videoActive,
 }: {
   chatMessages: ChatMessage[];
+  collaborationProvider: P2PCollaborationProvider | null;
+  collaborationPeerCursor: boolean;
   fileTransfers: FileTransferSnapshot[];
   locale: RoomLocale;
   onExitComplete?: () => void;
@@ -2452,6 +2458,7 @@ function RoomWorkspace({
     const Icon = workspaceIcons[workspaceId];
     return {
       badge: workspaceId === "chat" ? unreadChatCount : workspaceId === "files" ? pendingFileRequests : undefined,
+      activeColor: workspaceId === "collaborate" && collaborationPeerCursor ? "#34d399" : undefined,
       icon: <Icon aria-hidden="true" className="size-full" />,
       id: workspaceId,
       isActive: activeWorkspace === workspaceId,
@@ -2462,7 +2469,9 @@ function RoomWorkspace({
           ? activeWorkspace !== "voice" && voiceActive
           : workspaceId === "video"
             ? activeWorkspace !== "video" && videoActive
-            : workspaceId === "watch" && activeWorkspace !== "watch" && sharedPlayback !== null,
+            : workspaceId === "watch"
+              ? activeWorkspace !== "watch" && sharedPlayback !== null
+              : workspaceId === "collaborate" && activeWorkspace !== "collaborate" && collaborationPeerCursor,
       onClick: () => activateWorkspace(workspaceId),
     };
   });
@@ -2554,7 +2563,7 @@ function RoomWorkspace({
                 const isRunning = runningWorkspaces.includes(activeWorkspace);
 
                 return (
-                  <section className={activeWorkspace === "chat" || activeWorkspace === "files" || activeWorkspace === "video" || activeWorkspace === "voice" || activeWorkspace === "watch" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
+                  <section className={activeWorkspace === "chat" || activeWorkspace === "collaborate" || activeWorkspace === "files" || activeWorkspace === "video" || activeWorkspace === "voice" || activeWorkspace === "watch" || activeWorkspace === "status" ? "flex h-full min-h-0 w-full flex-1 justify-center" : "flex min-h-0 w-full flex-1 items-center justify-center py-6"}>
                     {activeWorkspace === "chat" ? (
                       <ChatWorkspace
                         accent={theme.accent}
@@ -2621,6 +2630,8 @@ function RoomWorkspace({
                         onShareScreenWithoutAudio={onShareScreenWithoutAudio}
                         speakerActive={speakerActive}
                       />
+                    ) : activeWorkspace === "collaborate" ? (
+                      <CollaborationWorkspace accent={theme.accent} locale={locale} provider={collaborationProvider} />
                     ) : activeWorkspace === "status" ? (
                       <div className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
                         <OverlayScrollbar
@@ -2766,6 +2777,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const [connectionRoute, setConnectionRoute] = useState<ConnectionRoute>("direct");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [fileTransfers, setFileTransfers] = useState<FileTransferSnapshot[]>([]);
+  const [collaborationProvider, setCollaborationProvider] = useState<P2PCollaborationProvider | null>(null);
+  const [collaborationPeerCursor, setCollaborationPeerCursor] = useState(false);
   const [mediaTransport, setMediaTransport] = useState<MediaTransport | null>(null);
   const [microphoneActive, setMicrophoneActive] = useState(false);
   const [microphoneDeviceId, setMicrophoneDeviceId] = useState<string | null>(null);
@@ -2804,6 +2817,24 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const cameraTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenVideoTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenAudioTrackRef = useRef<MediaStreamTrack | null>(null);
+
+  useEffect(() => {
+    if (!collaborationProvider) {
+      setCollaborationPeerCursor(false);
+      return;
+    }
+    const refreshPeerCursor = () => {
+      const hasPeerCursor = [...collaborationProvider.awareness.getStates()].some(([clientId, state]) => (
+        clientId !== collaborationProvider.document.clientID && Boolean((state as { cursor?: unknown } | null)?.cursor)
+      ));
+      setCollaborationPeerCursor((current) => current === hasPeerCursor ? current : hasPeerCursor);
+    };
+    collaborationProvider.awareness.on("update", refreshPeerCursor);
+    refreshPeerCursor();
+    return () => {
+      collaborationProvider.awareness.off("update", refreshPeerCursor);
+    };
+  }, [collaborationProvider]);
   const [progress, setProgress] = useState<ConnectionProgress>({
     websocket: { state: "pending", detail: "Waiting for signaling socket" },
     resource: { state: "pending", detail: "Waiting to request Cloudflare resources" },
@@ -3218,6 +3249,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       },
     );
     sessionRef.current = session;
+    const provider = new P2PCollaborationProvider(session);
+    setCollaborationProvider(provider);
     setMediaTransport(session.media);
     const unsubscribeMedia = session.media.subscribe((slots) => {
       const remoteAudio = slots.find((slot) => slot.id === "camera-audio");
@@ -3260,6 +3293,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       screenAudioTrackRef.current?.stop();
       screenAudioTrackRef.current = null;
       sessionRef.current = null;
+      provider.destroy();
+      setCollaborationProvider(null);
       setMediaTransport(null);
       setMicrophoneActive(false);
       setMicrophoneDeviceId(null);
@@ -3308,7 +3343,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     if (!file) return null;
     return { file, transport: await sessionRef.current?.getTransportDiagnostics() ?? {
       availableOutgoingBitrate: null,
-      bufferedAmount: { bulk: null, control: null, interactive: null },
+      bufferedAmount: { bulk: null, collaboration: null, control: null, interactive: null },
       bytesReceived: null,
       bytesSent: null,
       currentRoundTripTime: null,
@@ -3640,6 +3675,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       ) : dialogPhase === "ready" || dialogPhase === "closing-for-reconnect" ? (
         <RoomWorkspace
           chatMessages={chatMessages}
+          collaborationProvider={collaborationProvider}
+          collaborationPeerCursor={collaborationPeerCursor}
           fileTransfers={fileTransfers}
           locale={locale}
           onLeave={leave}
