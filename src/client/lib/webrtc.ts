@@ -802,6 +802,7 @@ export class NativeWebRTCSession {
     if (this.closed || this.suspended) return;
     this.clearReconnectTimer();
     if (resetBackoff) this.reconnectAttempt = 0;
+    this.stopHeartbeat();
     const previous = this.socket;
     if (previous && previous.readyState !== WebSocket.CLOSED) {
       previous.onopen = null; previous.onmessage = null; previous.onerror = null; previous.onclose = null;
