@@ -48,14 +48,23 @@ export function OverlayScrollbar({
   ...props
 }: OverlayScrollbarProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
   const instanceRef = useRef<ReturnType<typeof OverlayScrollbars> | null>(null);
 
   useEffect(() => {
     const host = hostRef.current;
-    if (!host || prepareNativeScrollbarHost(host)) return;
+    const viewport = viewportRef.current;
+    if (!host || !viewport || prepareNativeScrollbarHost(host)) return;
 
     const existing = OverlayScrollbars(host);
-    const instance = existing ?? OverlayScrollbars(host, options);
+    const instance = existing ?? OverlayScrollbars({
+      target: host,
+      elements: {
+        content: false,
+        padding: false,
+        viewport,
+      },
+    }, options);
     if (existing) existing.options(options);
     instanceRef.current = instance;
 
@@ -76,7 +85,9 @@ export function OverlayScrollbar({
       className={cn("overflow-y-auto", className)}
       data-overlayscrollbars-initialize=""
     >
-      {children}
+      <div className="min-h-full" ref={viewportRef}>
+        {children}
+      </div>
     </div>
   );
 }
