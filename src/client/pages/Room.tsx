@@ -2386,6 +2386,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         fileTransfersRef.current = [];
         setFileTransfers([]);
         void fileManagerRef.current?.clearSession();
+        session.media.stopLocalTracks();
         rawMicrophoneTrackRef.current?.stop();
         rawMicrophoneTrackRef.current = null;
         cameraTrackRef.current?.stop();

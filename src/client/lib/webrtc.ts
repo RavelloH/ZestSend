@@ -827,6 +827,10 @@ export class NativeWebRTCSession {
       }
       void this.flushSignals();
       if (this.remoteParticipantJoined && this.initiator && this.readyForPeerConnection && !this.peer) void this.createOffer();
+      // A signaling-only interruption does not close the SCTP channels. In
+      // that case no channel `onopen` event fires again, so explicitly restore
+      // the ready UI after the signaling lease is resumed.
+      if (this.connectedNotified && this.openDataChannelCount() === DATA_CHANNEL_COUNT) this.onConnected(this);
       return;
     }
     if (message.type === "pong") {
@@ -838,7 +842,7 @@ export class NativeWebRTCSession {
     }
     if (message.type === "left") { if (this.leaving) this.finishClose(); return; }
     if (message.type === "peer-ready" || message.type === "negotiate") {
-      this.updateRemoteMetadata(message);
+      if (!this.updateRemoteMetadata(message)) return;
       this.remoteParticipantJoined = true;
       if (message.type === "negotiate") this.resetPeerForNegotiation();
       if (!this.readyForPeerConnection) this.setStep("p2p", { state: "checking", detail: "Peer joined, preparing P2P connection" });
@@ -849,7 +853,7 @@ export class NativeWebRTCSession {
       return;
     }
     if (message.type === "peer-disconnected" || message.type === "peer-reconnected") {
-      this.updateRemoteMetadata(message as unknown as { epoch?: number; peerId?: string; peerSessionId?: string; slotId?: string; offererSlotId?: string });
+      if (!this.updateRemoteMetadata(message as unknown as { epoch?: number; peerId?: string; peerSessionId?: string; slotId?: string; offererSlotId?: string })) return;
       if (message.type === "peer-disconnected") {
         // Keep the P2P transport alive while the remote signaling lease is
         // within its grace period; the room will emit peer-left on expiry.
@@ -881,6 +885,8 @@ export class NativeWebRTCSession {
       this.pendingSignals.push(signal); void this.flushSignals(); return;
     }
     if (message.type === "peer-left") {
+      const eventEpoch = v2Epoch(message.epoch);
+      if (eventEpoch !== undefined && this.epoch !== 0 && eventEpoch < this.epoch) return;
       if (message.peerSessionId && this.remotePeerSessionId && message.peerSessionId !== this.remotePeerSessionId) return;
       this.remoteParticipantJoined = false; this.remoteSlotId = null; this.remotePeerSessionId = null;
       this.stopDataChannelLatencyProbe(); this.closeDataChannels(); this.mediaTransport.detachPeer();
@@ -903,8 +909,9 @@ export class NativeWebRTCSession {
     }
   }
 
-  private updateRemoteMetadata(message: { epoch?: number; peerId?: string; peerSessionId?: string; slotId?: string; offererSlotId?: string; peers?: Array<{ slotId?: string; peerSessionId?: string }> }): void {
+  private updateRemoteMetadata(message: { epoch?: number; peerId?: string; peerSessionId?: string; slotId?: string; offererSlotId?: string; peers?: Array<{ slotId?: string; peerSessionId?: string }> }): boolean {
     const epoch = v2Epoch(message.epoch);
+    if (epoch !== undefined && this.epoch !== 0 && epoch < this.epoch) return false;
     if (epoch !== undefined && epoch !== this.epoch) { this.epoch = epoch; this.pendingSignals = []; }
     const announcedSlotId = message.slotId ?? message.peerId;
     const announcedPeerSessionId = message.peerSessionId;
@@ -917,6 +924,7 @@ export class NativeWebRTCSession {
       this.remotePeerSessionId = peerFromList.peerSessionId ?? this.remotePeerSessionId;
     }
     if (message.offererSlotId) { this.offererSlotId = message.offererSlotId; this.initiator = this.offererSlotId === this.slotId; }
+    return true;
   }
 
   private acceptSignal(signal: V2Signal): boolean {
