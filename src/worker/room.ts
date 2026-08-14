@@ -242,7 +242,10 @@ export class Room extends DurableObject<Env> {
         // Preserve clients that raced their first signal ahead of the legacy ping.
         if (parsed.type === "signal") {
           const admitted = await this.admit(socket, "new", null, attachment);
-          if (admitted) await this.forwardSignal(socket, parsed);
+          if (admitted) {
+            const current = await this.currentSlot(socket, attachmentFor(socket) ?? attachment);
+            if (current) await this.forwardSignal(socket, parsed, current.slot);
+          }
           return;
         }
         this.sendErrorAndClose(socket, "hello-required", "Send a hello message first.", 4_014);
