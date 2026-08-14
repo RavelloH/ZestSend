@@ -5,6 +5,7 @@ import {
   RiCheckDoubleLine,
   RiCheckLine,
   RiChat3Line,
+  RiClockwiseLine,
   RiCloseCircleFill,
   RiDeleteBinLine,
   RiDownload2Line,
@@ -57,6 +58,7 @@ import {
   RiVideoOnLine,
   RiWifiLine,
   RiVolumeUpLine,
+  RiZoomInLine,
 } from "@remixicon/react";
 import NumberFlow, { NumberFlowGroup } from "@number-flow/react";
 import { useNavigate } from "@tanstack/react-router";
@@ -1111,7 +1113,7 @@ function waitForMediaMetadata(element: HTMLMediaElement): Promise<void> {
   });
 }
 
-function VideoStream({ className, muted, stream }: { className?: string; muted?: boolean; stream: MediaStream }) {
+function VideoStream({ className, muted, stream, style }: { className?: string; muted?: boolean; stream: MediaStream; style?: CSSProperties }) {
   const ref = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -1121,7 +1123,141 @@ function VideoStream({ className, muted, stream }: { className?: string; muted?:
     void element.play().catch(() => undefined);
   }, [stream]);
 
-  return <video autoPlay className={className} muted={muted} playsInline ref={ref} />;
+  return <video autoPlay className={className} muted={muted} playsInline ref={ref} style={style} />;
+}
+
+function FloatingVideoSidecars({ media, locale, onFocus }: { media: MediaTransport | null; locale: RoomLocale; onFocus: (id: VideoTile["id"]) => void }) {
+  const [mediaVersion, setMediaVersion] = useState(0);
+  const [viewportWidth, setViewportWidth] = useState(() => typeof window === "undefined" ? 1_280 : window.innerWidth);
+  const boundsRef = useRef<HTMLDivElement>(null);
+  const draggedBasePositionsRef = useRef(new Map<VideoTile["id"], { bottom: number; position: { left: number } | { right: number } }>());
+  const pointerStartRef = useRef(new Map<VideoTile["id"], { x: number; y: number }>());
+  const suppressClickRef = useRef(new Set<VideoTile["id"]>());
+  const localStreamsRef = useRef(new Map<"camera-video" | "screen-video", MediaStream>());
+  const signatureRef = useRef("");
+
+  useEffect(() => {
+    if (!media) return;
+    return media.subscribe((slots) => {
+      const signature = slots
+        .filter((slot) => slot.id === "camera-video" || slot.id === "screen-video")
+        .map((slot) => `${slot.id}:${slot.localState}:${slot.remoteState}:${slot.remoteStream?.id ?? ""}:${media.getLocalTrack(slot.id)?.id ?? ""}`)
+        .join("|");
+      if (signature === signatureRef.current) return;
+      signatureRef.current = signature;
+      setMediaVersion((current) => current + 1);
+    });
+  }, [media]);
+
+  useEffect(() => {
+    const updateViewportWidth = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", updateViewportWidth);
+    return () => window.removeEventListener("resize", updateViewportWidth);
+  }, []);
+
+  const groups = useMemo(() => {
+    const streamForLocalTrack = (id: "camera-video" | "screen-video", track: MediaStreamTrack | null) => {
+      if (!track) {
+        localStreamsRef.current.delete(id);
+        return undefined;
+      }
+      const current = localStreamsRef.current.get(id);
+      if (current?.getVideoTracks()[0] === track) return current;
+      const stream = new MediaStream([track]);
+      localStreamsRef.current.set(id, stream);
+      return stream;
+    };
+    const copy = locale === "zh" ? {
+      localCamera: "我的视频",
+      localScreen: "我的屏幕",
+      remoteCamera: "对方视频",
+      remoteScreen: "对方屏幕",
+    } : {
+      localCamera: "YOUR VIDEO",
+      localScreen: "YOUR SCREEN",
+      remoteCamera: "THEIR VIDEO",
+      remoteScreen: "THEIR SCREEN",
+    };
+    const remoteCamera = media?.getRemoteStream("camera-video");
+    const remoteScreen = media?.getRemoteStream("screen-video");
+    const localCamera = streamForLocalTrack("camera-video", media?.getLocalTrack("camera-video") ?? null);
+    const localScreen = streamForLocalTrack("screen-video", media?.getLocalTrack("screen-video") ?? null);
+    const remote: Array<Pick<VideoTile, "id" | "label" | "stream"> | null> = [
+      remoteCamera ? { id: "remote-camera", label: copy.remoteCamera, stream: remoteCamera } : null,
+      remoteScreen ? { id: "remote-screen", label: copy.remoteScreen, stream: remoteScreen } : null,
+    ];
+    const local: Array<Pick<VideoTile, "id" | "label" | "stream"> | null> = [
+      localCamera ? { id: "local-camera", label: copy.localCamera, stream: localCamera } : null,
+      localScreen ? { id: "local-screen", label: copy.localScreen, stream: localScreen } : null,
+    ];
+    const isVideoTile = (tile: Pick<VideoTile, "id" | "label" | "stream"> | null): tile is Pick<VideoTile, "id" | "label" | "stream"> => tile !== null;
+    return { local: local.filter(isVideoTile), remote: remote.filter(isVideoTile) };
+  }, [locale, media, mediaVersion]);
+
+  if (!groups.local.length && !groups.remote.length) return null;
+
+  const sideGutter = Math.max(0, (viewportWidth - 768) / 2);
+  const cardWidth = Math.max(160, Math.min(560, sideGutter - 32));
+  const cardHeight = cardWidth * 9 / 16;
+  const floatingTiles = [
+    ...groups.remote.map((tile, index) => ({ index, owner: "remote" as const, tile })),
+    ...groups.local.map((tile, index) => ({ index, owner: "local" as const, tile })),
+  ];
+
+  return <div className="pointer-events-none fixed inset-x-0 bottom-28 top-20 z-40 hidden xl:block" ref={boundsRef}>
+    <AnimatePresence initial>
+      {floatingTiles.map(({ index, owner, tile }) => {
+        const offset = Math.max(16, sideGutter - cardWidth - 24);
+        const position = owner === "remote" ? { left: offset } : { right: offset };
+        const defaultBottom = 4 + index * (cardHeight + 12);
+        const draggedBasePosition = draggedBasePositionsRef.current.get(tile.id);
+        return <motion.button
+          animate={{ opacity: 1, scale: 1 }}
+          aria-label={tile.label}
+          className="pointer-events-auto group absolute touch-none cursor-grab overflow-hidden rounded-2xl border border-white/10 bg-black/35 text-left shadow-2xl shadow-black/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60 active:cursor-grabbing"
+          drag
+          dragConstraints={boundsRef}
+          dragElastic={0.08}
+          dragMomentum={false}
+          exit={{ opacity: 0, scale: 0.96 }}
+          initial={{ opacity: 0, scale: 0.96 }}
+          key={tile.id}
+          layout="position"
+          onClick={(event) => {
+            if (suppressClickRef.current.delete(tile.id)) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+            onFocus(tile.id);
+          }}
+          onDragEnd={() => {
+            suppressClickRef.current.add(tile.id);
+            window.setTimeout(() => suppressClickRef.current.delete(tile.id), 500);
+          }}
+          onDragStart={() => {
+            if (!draggedBasePositionsRef.current.has(tile.id)) draggedBasePositionsRef.current.set(tile.id, { bottom: defaultBottom, position });
+            suppressClickRef.current.add(tile.id);
+          }}
+          onPointerDownCapture={(event) => pointerStartRef.current.set(tile.id, { x: event.clientX, y: event.clientY })}
+          onPointerMoveCapture={(event) => {
+            const start = pointerStartRef.current.get(tile.id);
+            if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 4) suppressClickRef.current.add(tile.id);
+          }}
+          onPointerUpCapture={() => pointerStartRef.current.delete(tile.id)}
+          onPointerCancelCapture={() => pointerStartRef.current.delete(tile.id)}
+          style={{ ...(draggedBasePosition?.position ?? position), bottom: draggedBasePosition?.bottom ?? defaultBottom, height: cardHeight, width: cardWidth }}
+          transition={{ layout: { damping: 28, mass: 0.7, stiffness: 300, type: "spring" }, opacity: { duration: 0.2 }, scale: { duration: 0.2 } }}
+          type="button"
+          whileTap={{ scale: 0.98 }}
+        >
+          <VideoStream className="block size-full object-contain" muted stream={tile.stream} />
+          <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-3 pb-2.5 pt-7 text-[10px] font-bold tracking-[0.08em] text-sky-50/85">{tile.label}</span>
+          <span className="pointer-events-none absolute inset-0 grid place-items-center bg-black/20 opacity-0 transition-opacity duration-200 group-hover:opacity-100"><span className="glass grid size-10 place-items-center !rounded-full text-sky-50"><RiZoomInLine aria-hidden="true" className="size-5" /></span></span>
+        </motion.button>;
+      })}
+    </AnimatePresence>
+  </div>;
 }
 
 function VideoShell({ children, footer }: { children: ReactNode; footer: ReactNode }) {
@@ -1199,6 +1335,7 @@ function VideoWorkspace({
   accent,
   cameraActive,
   cameraDeviceId,
+  focusTileId,
   locale,
   media,
   onSelectCamera,
@@ -1217,6 +1354,7 @@ function VideoWorkspace({
   accent: string;
   cameraActive: boolean;
   cameraDeviceId: string | null;
+  focusTileId: VideoTile["id"] | null;
   locale: RoomLocale;
   media: MediaTransport | null;
   onSelectCamera: (deviceId: string) => Promise<boolean>;
@@ -1237,19 +1375,25 @@ function VideoWorkspace({
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [mediaVersion, setMediaVersion] = useState(0);
   const [primaryId, setPrimaryId] = useState<VideoTile["id"] | null>(null);
+  const [tileRotations, setTileRotations] = useState<Partial<Record<VideoTile["id"], number>>>({});
+  const [videoFullscreen, setVideoFullscreen] = useState(false);
   const signatureRef = useRef("");
   const localStreamsRef = useRef(new Map<"camera-video" | "screen-video", MediaStream>());
+  const videoSurfaceRef = useRef<HTMLDivElement>(null);
   const copy = locale === "zh" ? {
     camera: "摄像头",
     cameraOff: "打开摄像头",
     cameraOn: "关闭摄像头",
     chooseCamera: "选择摄像头",
+    exitFullscreen: "退出全屏",
+    fullscreen: "全屏",
     noVideo: "尚未有视频流",
     quality: "视频设置",
     qualityDescription: "带宽不足时会由浏览器自动降低实际编码质量。",
     screen: "屏幕共享",
     screenOff: "开始共享",
     screenOn: "停止共享",
+    rotate: "旋转画面",
     speaker: "扬声器",
     videoQuality: "目标视频质量",
     localCamera: "我的视频",
@@ -1264,12 +1408,15 @@ function VideoWorkspace({
     cameraOff: "Turn camera on",
     cameraOn: "Turn camera off",
     chooseCamera: "Choose camera",
+    exitFullscreen: "Exit full screen",
+    fullscreen: "Full screen",
     noVideo: "No video stream yet",
     quality: "Video settings",
     qualityDescription: "The browser automatically reduces the actual encode quality when bandwidth is limited.",
     screen: "Screen share",
     screenOff: "Start sharing",
     screenOn: "Stop sharing",
+    rotate: "Rotate video",
     speaker: "Speaker",
     videoQuality: "Target video quality",
     localCamera: "YOUR VIDEO",
@@ -1337,6 +1484,32 @@ function VideoWorkspace({
   const primary = tiles.find((tile) => tile.id === primaryId) ?? tiles[0];
   const secondary = tiles.filter((tile) => tile.id !== primary?.id);
   const secondarySpan = secondary.length === 1 ? "col-span-6 mx-auto w-full max-w-md" : secondary.length === 2 ? "col-span-3" : "col-span-2";
+
+  useEffect(() => {
+    if (focusTileId && tiles.some((tile) => tile.id === focusTileId)) setPrimaryId(focusTileId);
+  }, [focusTileId, tiles]);
+
+  const toggleFullscreen = () => {
+    const surface = videoSurfaceRef.current;
+    if (!surface) return;
+    if (document.fullscreenElement === surface) {
+      void document.exitFullscreen().catch(() => undefined);
+      return;
+    }
+    void surface.requestFullscreen().catch(() => undefined);
+  };
+
+  useEffect(() => {
+    const syncFullscreen = () => setVideoFullscreen(document.fullscreenElement === videoSurfaceRef.current);
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreen);
+  }, []);
+
+  useEffect(() => {
+    const activeIds = new Set(tiles.map((tile) => tile.id));
+    setTileRotations((current) => Object.fromEntries(Object.entries(current).filter(([id]) => activeIds.has(id as VideoTile["id"]))) as Partial<Record<VideoTile["id"], number>>);
+  }, [tiles]);
+
   return <VideoShell
     footer={<div className="flex h-full items-center justify-center gap-7 sm:gap-10">
       {[
@@ -1363,8 +1536,9 @@ function VideoWorkspace({
       <AutoTransition className="flex size-full min-h-0 items-center justify-center" duration={0.22} presenceMode="wait" transitionKey={primary ? "active" : "empty"} type="fade">
         {!primary ? <WorkspaceEmptyState icon={<RiVideoOnLine aria-hidden="true" className="size-10 text-sky-200/55" />} message={copy.noVideo} /> : (
         <motion.div
-          className="grid h-full min-h-0 w-full max-w-5xl grid-cols-6 gap-2.5"
+          className="group/video relative grid h-full min-h-0 w-full max-w-5xl grid-cols-6 gap-2.5"
           layout
+          ref={videoSurfaceRef}
           style={{ gridTemplateRows: secondary.length > 0 ? "minmax(0, 1fr) clamp(4.5rem, 15vh, 9rem)" : "minmax(0, 1fr)" }}
           transition={{ layout: { damping: 30, mass: 0.8, stiffness: 280, type: "spring" } }}
         >
@@ -1372,17 +1546,22 @@ function VideoWorkspace({
             const isPrimary = tile.id === primary.id;
             return <motion.button
               aria-label={isPrimary ? tile.label : `${locale === "zh" ? "切换到主画面：" : "Make primary: "}${tile.label}`}
-              className={`relative flex min-h-0 items-center justify-center overflow-hidden bg-black/30 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60 ${isPrimary ? "col-span-6 row-start-1 cursor-default rounded-2xl shadow-2xl shadow-black/15" : `${secondarySpan} row-start-2 cursor-pointer rounded-xl shadow-xl shadow-black/10`}`}
+              className={`relative flex min-h-0 items-center justify-center overflow-hidden bg-black/30 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60 ${isPrimary ? "col-span-6 row-start-1 cursor-default rounded-2xl shadow-2xl shadow-black/15" : `${secondarySpan} group/thumb row-start-2 cursor-pointer rounded-xl shadow-xl shadow-black/10`}`}
               key={tile.id}
               layout
               onClick={() => { if (!isPrimary) setPrimaryId(tile.id); }}
               transition={{ layout: { damping: 30, mass: 0.8, stiffness: 280, type: "spring" } }}
               type="button"
             >
-              <VideoStream className="block h-auto max-h-full w-auto max-w-full object-contain" muted={tile.muted} stream={tile.stream} />
+              <VideoStream className="block h-auto max-h-full w-auto max-w-full object-contain transition-transform duration-300" muted={tile.muted} stream={tile.stream} style={{ transform: isPrimary ? `rotate(${tileRotations[tile.id] ?? 0}deg)` : undefined }} />
               <span className={`${isPrimary ? "left-3 top-3 px-2 py-1 text-xs" : "left-2 top-2 px-1.5 py-0.5 text-[10px]"} absolute rounded-md bg-black/35 font-bold tracking-[0.08em] text-sky-50/80`}>{tile.label}</span>
+              {!isPrimary ? <span className="pointer-events-none absolute inset-0 grid place-items-center bg-black/20 opacity-0 transition-opacity duration-200 group-hover/thumb:opacity-100"><span className="glass grid size-12 place-items-center !rounded-full text-sky-50"><RiZoomInLine aria-hidden="true" className="size-6" /></span></span> : null}
             </motion.button>;
           })}
+          <div className="pointer-events-none absolute right-3 top-3 z-10 flex gap-2 opacity-0 transition-opacity duration-200 group-hover/video:opacity-100 group-focus-within/video:opacity-100">
+            <button aria-label={copy.rotate} className="glass pointer-events-auto grid size-10 place-items-center !rounded-xl text-sky-100/80 transition-colors hover:bg-white/[0.1] hover:text-sky-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60" onClick={() => { if (primary) setTileRotations((current) => ({ ...current, [primary.id]: ((current[primary.id] ?? 0) + 90) % 360 })); }} type="button"><RiClockwiseLine aria-hidden="true" className="size-5" /></button>
+            <button aria-label={videoFullscreen ? copy.exitFullscreen : copy.fullscreen} className="glass pointer-events-auto grid size-10 place-items-center !rounded-xl text-sky-100/80 transition-colors hover:bg-white/[0.1] hover:text-sky-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-100/60" onClick={toggleFullscreen} type="button">{videoFullscreen ? <RiFullscreenExitLine aria-hidden="true" className="size-5" /> : <RiFullscreenLine aria-hidden="true" className="size-5" />}</button>
+          </div>
         </motion.div>
         )}
       </AutoTransition>
@@ -2207,6 +2386,7 @@ function RoomWorkspace({
   const { theme } = useTheme();
   const workspace = workspaceCopy[locale];
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId | null>(() => workspaceFromHash());
+  const [focusedVideoTileId, setFocusedVideoTileId] = useState<VideoTile["id"] | null>(null);
   const [unreadChatCount, setUnreadChatCount] = useState(0);
   const [isExitDialogOpen, setExitDialogOpen] = useState(false);
   const [isSpeakerDialogOpen, setSpeakerDialogOpen] = useState(false);
@@ -2417,6 +2597,7 @@ function RoomWorkspace({
                         accent={theme.accent}
                         cameraActive={cameraActive}
                         cameraDeviceId={cameraDeviceId}
+                        focusTileId={focusedVideoTileId}
                         locale={locale}
                         media={media}
                         onSelectCamera={onSelectCamera}
@@ -2472,6 +2653,11 @@ function RoomWorkspace({
               })()}
             </AutoTransition>
           </main>
+
+          {activeWorkspace !== "video" ? <FloatingVideoSidecars media={media} locale={locale} onFocus={(tileId) => {
+            setFocusedVideoTileId(tileId);
+            activateWorkspace("video");
+          }} /> : null}
 
           <div className="pointer-events-none absolute inset-x-0 bottom-5 flex justify-center sm:bottom-7">
             <div
