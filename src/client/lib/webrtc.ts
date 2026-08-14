@@ -509,7 +509,7 @@ export function stopObservingIceServers(listener: IcePreparationListener): void 
 
 
 const V2_RECONNECT_DELAYS = [250, 500, 1_000, 2_000, 4_000, 5_000] as const;
-const V2_HEARTBEAT_INTERVAL = 15_000;
+const V2_HEARTBEAT_INTERVAL = 5_000;
 const V2_MAX_HEARTBEAT_MISSES = 3;
 type V2HelloMode = "new" | "resume-signaling" | "restart-peer";
 
@@ -845,9 +845,9 @@ export class NativeWebRTCSession {
       socket.onopen = () => {
         if (generation !== this.socketGeneration || this.closed || this.suspended) return;
         this.setStep("websocket", { state: "active", detail: "Signaling socket connected" });
-        this.startHeartbeat(generation);
         const token = mode === "new" ? undefined : this.resumeToken ?? undefined;
         this.sendSocket({ type: "hello", mode, ...(token ? { resumeToken: token } : {}) });
+        this.startHeartbeat(generation);
         void this.prepareIceServers();
       };
       socket.onmessage = (event) => {
@@ -1232,14 +1232,16 @@ export class NativeWebRTCSession {
 
   private startHeartbeat(generation: number): void {
     this.stopHeartbeat();
-    this.heartbeatTimer = window.setInterval(() => {
+    const sendHeartbeat = () => {
       if (this.closed || this.suspended || generation !== this.socketGeneration || this.socket?.readyState !== WebSocket.OPEN) return;
       if (this.heartbeatStartedAt !== null) {
         this.heartbeatMisses += 1;
         if (this.heartbeatMisses >= V2_MAX_HEARTBEAT_MISSES) { this.socket?.close(4_001, "Signaling heartbeat timeout"); return; }
       }
       this.heartbeatStartedAt = performance.now(); this.sendSocket({ type: "ping" });
-    }, V2_HEARTBEAT_INTERVAL);
+    };
+    sendHeartbeat();
+    this.heartbeatTimer = window.setInterval(sendHeartbeat, V2_HEARTBEAT_INTERVAL);
   }
 
   private stopHeartbeat(): void {

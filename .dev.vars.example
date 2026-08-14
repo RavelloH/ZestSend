@@ -1,0 +1,4 @@
+# Optional Cloudflare Realtime TURN credentials.
+# Leave both values empty to use public STUN only.
+TURN_ID=
+TURN_TOKEN=

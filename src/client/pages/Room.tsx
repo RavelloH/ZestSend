@@ -482,7 +482,7 @@ function StatusRow({ icon: Icon, label, locale, nonBlockingFailure = false, real
           type="fade"
         >
           {status.channels !== undefined ? (
-            <span className="text-sky-100/55">{status.channels} / 3</span>
+            <span className="text-sky-100/55">{status.channels} / 4</span>
           ) : status.latency !== undefined ? (
             <LatencyValue latency={status.latency} realtimeConnection={realtimeConnection} />
           ) : null}

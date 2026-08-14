@@ -13,7 +13,17 @@
     "check": "tsc -b",
     "preview": "vite preview",
     "cf-typegen": "wrangler types",
-    "deploy": "pnpm run build && wrangler deploy"
+    "deploy": "pnpm run build && wrangler deploy --keep-vars"
+  },
+  "cloudflare": {
+    "bindings": {
+      "TURN_ID": {
+        "description": "Optional Cloudflare Realtime TURN key ID. Leave this and `TURN_TOKEN` empty to use public STUN only."
+      },
+      "TURN_TOKEN": {
+        "description": "Optional Cloudflare Realtime TURN API token paired with `TURN_ID`. Keep this value secret."
+      }
+    }
   },
   "dependencies": {
     "@number-flow/react": "^0.6.2",
