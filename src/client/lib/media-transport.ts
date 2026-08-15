@@ -191,17 +191,24 @@ export class MediaTransport {
   async replaceLocalTrack(id: MediaSlotId, track: MediaStreamTrack | null, state: MediaSlotState = track ? "live" : "idle"): Promise<boolean> {
     const slot = this.slots.get(id)!;
     if (track && track.kind !== slot.kind) throw new TypeError(`${id} only accepts ${slot.kind} tracks.`);
-    if (!slot.sender) return false;
+    const peer = this.peer;
+    const sender = slot.sender;
+    if (!peer || !sender) return false;
 
     try {
-      await slot.sender.replaceTrack(track);
-      if (id === "playback-video" && track) await this.configureSharedPlaybackVideo(slot.sender);
+      await sender.replaceTrack(track);
+      if (this.peer !== peer || slot.sender !== sender) return false;
+      if (id === "playback-video" && track) {
+        await this.configureSharedPlaybackVideo(sender);
+        if (this.peer !== peer || slot.sender !== sender) return false;
+      }
       slot.localTrack = track;
       slot.localState = state;
       this.sendControl({ slot: id, state, type: "media-slot-update" });
       this.emit();
       return true;
     } catch {
+      if (this.peer !== peer || slot.sender !== sender) return false;
       slot.localState = "failed";
       this.sendControl({ slot: id, state: "failed", type: "media-slot-update" });
       this.emit();

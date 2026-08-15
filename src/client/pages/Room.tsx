@@ -1091,6 +1091,13 @@ type SharedPlayback = {
   playing: boolean;
 };
 
+type PeerSessionScope = {
+  generation: number;
+  media: MediaTransport;
+  session: NativeWebRTCSession;
+  signal: AbortSignal;
+};
+
 type CapturableMediaElement = HTMLMediaElement & {
   captureStream?: () => MediaStream;
   mozCaptureStream?: () => MediaStream;
@@ -1114,7 +1121,8 @@ function localMediaKind(file: File): "audio" | "video" | null {
   return null;
 }
 
-function waitForMediaMetadata(element: HTMLMediaElement): Promise<void> {
+function waitForMediaMetadata(element: HTMLMediaElement, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new DOMException("The peer session was replaced.", "AbortError"));
   if (element.readyState >= HTMLMediaElement.HAVE_METADATA) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const onLoaded = () => {
@@ -1125,13 +1133,23 @@ function waitForMediaMetadata(element: HTMLMediaElement): Promise<void> {
       cleanup();
       reject(new Error("The selected media file could not be opened."));
     };
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException("The peer session was replaced.", "AbortError"));
+    };
     const cleanup = () => {
       element.removeEventListener("loadedmetadata", onLoaded);
       element.removeEventListener("error", onError);
+      signal.removeEventListener("abort", onAbort);
     };
     element.addEventListener("loadedmetadata", onLoaded, { once: true });
     element.addEventListener("error", onError, { once: true });
+    signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function VideoStream({ className, muted, stream, style }: { className?: string; muted?: boolean; stream: MediaStream; style?: CSSProperties }) {
@@ -2650,7 +2668,7 @@ function RoomWorkspace({
                     ) : activeWorkspace === "collaborate" ? (
                       <CollaborationWorkspace accent={theme.accent} locale={locale} onFeatureUsed={() => onFeatureUsed("collaborate")} provider={collaborationProvider} />
                     ) : activeWorkspace === "canvas" ? (
-                      <CollaborationCanvas accent={theme.accent} locale={locale} onFeatureUsed={() => onFeatureUsed("canvas")} provider={collaborationProvider} />
+                      <CollaborationCanvas accent={theme.accent} key={collaborationProvider?.document.clientID ?? "pending"} locale={locale} onFeatureUsed={() => onFeatureUsed("canvas")} provider={collaborationProvider} />
                     ) : activeWorkspace === "status" ? (
                       <div className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
                         <OverlayScrollbar
@@ -2799,6 +2817,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const usedFeaturesRef = useRef(new Set<MeasuredFeature>());
   const [canvasHasContent, setCanvasHasContent] = useState(false);
   const [collaborationProvider, setCollaborationProvider] = useState<P2PCollaborationProvider | null>(null);
+  const collaborationProviderRef = useRef<P2PCollaborationProvider | null>(null);
   const [collaborationPeerCursor, setCollaborationPeerCursor] = useState(false);
   const [mediaTransport, setMediaTransport] = useState<MediaTransport | null>(null);
   const [microphoneActive, setMicrophoneActive] = useState(false);
@@ -2886,6 +2905,46 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const sessionRef = useRef<NativeWebRTCSession | null>(null);
   const fileManagerRef = useRef<FileTransferManager | null>(null);
   const lastTypingSentAtRef = useRef(0);
+  const peerSessionGenerationRef = useRef(0);
+  const peerSessionAbortControllerRef = useRef(new AbortController());
+
+  const renewPeerSessionScope = () => {
+    peerSessionAbortControllerRef.current.abort();
+    peerSessionGenerationRef.current += 1;
+    peerSessionAbortControllerRef.current = new AbortController();
+  };
+
+  const disposePeerSessionScope = () => {
+    peerSessionAbortControllerRef.current.abort();
+    peerSessionGenerationRef.current += 1;
+  };
+
+  const capturePeerSessionScope = (): PeerSessionScope | null => {
+    const session = sessionRef.current;
+    const signal = peerSessionAbortControllerRef.current.signal;
+    if (!session || signal.aborted) return null;
+    return {
+      generation: peerSessionGenerationRef.current,
+      media: session.media,
+      session,
+      signal,
+    };
+  };
+
+  const isPeerSessionScopeCurrent = (scope: PeerSessionScope): boolean => (
+    !scope.signal.aborted
+    && scope.generation === peerSessionGenerationRef.current
+    && sessionRef.current === scope.session
+    && scope.session.media === scope.media
+  );
+
+  const replaceCollaborationProvider = (session: NativeWebRTCSession) => {
+    if (sessionRef.current !== session) return;
+    collaborationProviderRef.current?.destroy();
+    const provider = new P2PCollaborationProvider(session);
+    collaborationProviderRef.current = provider;
+    setCollaborationProvider(provider);
+  };
 
   const reportFeatureUsage = (feature: MeasuredFeature) => {
     if (usedFeaturesRef.current.has(feature)) return;
@@ -2992,12 +3051,14 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     const playback = sharedPlaybackRef.current;
     if (!playback || playback.owner !== "local") return;
     const element = sharedPlaybackElementRef.current;
-    const media = sessionRef.current?.media;
+    const session = sessionRef.current;
+    const media = session?.media;
     const audioTrack = media?.getLocalTrack("playback-audio") ?? null;
     const videoTrack = media?.getLocalTrack("playback-video") ?? null;
+    const sourceUrl = sharedPlaybackObjectUrlRef.current;
     sharedPlaybackTransitionRef.current = true;
 
-    if (announce) sessionRef.current?.sendControlMessage({ id: playback.id, type: "shared-playback-stopped" });
+    if (announce && sessionRef.current === session) session?.sendControlMessage({ id: playback.id, type: "shared-playback-stopped" });
     updateSharedPlayback(null);
     setSharedPlaybackError(null);
     if (element) {
@@ -3011,16 +3072,17 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     ]);
     audioTrack?.stop();
     videoTrack?.stop();
-    if (sharedPlaybackObjectUrlRef.current) URL.revokeObjectURL(sharedPlaybackObjectUrlRef.current);
-    sharedPlaybackObjectUrlRef.current = null;
+    if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+    if (sharedPlaybackObjectUrlRef.current === sourceUrl) sharedPlaybackObjectUrlRef.current = null;
     sharedPlaybackLastSyncRef.current = 0;
-    sharedPlaybackTransitionRef.current = false;
+    if (!sharedPlaybackRef.current) sharedPlaybackTransitionRef.current = false;
   };
 
   const applyLocalSharedPlaybackCommand = async (command: SharedPlaybackCommand, options?: { currentTime?: number; playbackRate?: number }) => {
+    const scope = capturePeerSessionScope();
     const playback = sharedPlaybackRef.current;
     const element = sharedPlaybackElementRef.current;
-    if (!playback || playback.owner !== "local" || !element) return;
+    if (!scope || !playback || playback.owner !== "local" || !element) return;
     if (command === "stop") {
       await clearLocalSharedPlayback();
       return;
@@ -3043,18 +3105,21 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     if (command === "play") {
       try {
         await element.play();
+        if (!isPeerSessionScopeCurrent(scope) || sharedPlaybackRef.current?.id !== playback.id) return;
         publishSharedPlaybackState(true);
       } catch (cause) {
+        if (!isPeerSessionScopeCurrent(scope) || sharedPlaybackRef.current?.id !== playback.id) return;
         setSharedPlaybackError(cause instanceof Error ? cause.message : locale === "zh" ? "无法播放所选媒体。" : "The selected media could not be played.");
       }
     }
   };
 
   const openSharedPlayback = async (file: File): Promise<void> => {
-    const media = sessionRef.current?.media;
+    const scope = capturePeerSessionScope();
     const element = sharedPlaybackElementRef.current;
     const initialKind = localMediaKind(file);
-    if (!media || !element) return;
+    if (!scope || !element) return;
+    const { media } = scope;
     if (!initialKind) {
       setSharedPlaybackError(locale === "zh" ? "请选择音频或视频文件。" : "Choose an audio or video file.");
       return;
@@ -3064,33 +3129,43 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       return;
     }
 
-    if (sharedPlaybackRef.current?.owner === "local") await clearLocalSharedPlayback();
+    if (sharedPlaybackRef.current?.owner === "local") {
+      await clearLocalSharedPlayback();
+      if (!isPeerSessionScopeCurrent(scope)) return;
+    }
     sharedPlaybackTransitionRef.current = true;
     setSharedPlaybackError(null);
     const id = cuid();
     const sourceUrl = URL.createObjectURL(file);
     sharedPlaybackObjectUrlRef.current = sourceUrl;
     updateSharedPlayback({ currentTime: 0, duration: 0, id, kind: initialKind, name: file.name, owner: "local", playbackRate: 1, playing: false });
+    let capturedTracks: MediaStreamTrack[] = [];
 
     try {
       element.pause();
       element.src = sourceUrl;
       element.load();
-      await waitForMediaMetadata(element);
+      await waitForMediaMetadata(element, scope.signal);
+      if (!isPeerSessionScopeCurrent(scope)) throw new DOMException("The peer session was replaced.", "AbortError");
       await element.play();
+      if (!isPeerSessionScopeCurrent(scope)) throw new DOMException("The peer session was replaced.", "AbortError");
       const stream = captureMediaStream(element);
       if (!stream) throw new Error(locale === "zh" ? "当前浏览器不支持捕获本地媒体播放流。" : "This browser cannot capture local media playback.");
       const audioTrack = stream.getAudioTracks()[0] ?? null;
       const videoTrack = stream.getVideoTracks()[0] ?? null;
+      capturedTracks = stream.getTracks();
       if (!audioTrack && !videoTrack) throw new Error(locale === "zh" ? "无法从所选媒体中读取可共享的音视频轨道。" : "No shareable audio or video track was found in this media.");
+      if (!isPeerSessionScopeCurrent(scope)) throw new DOMException("The peer session was replaced.", "AbortError");
       if (videoTrack) videoTrack.contentHint = "detail";
       const [audioAttached, videoAttached] = await Promise.all([
         media.replaceLocalTrack("playback-audio", audioTrack, audioTrack ? "live" : "idle"),
         media.replaceLocalTrack("playback-video", videoTrack, videoTrack ? "live" : "idle"),
       ]);
+      if (!isPeerSessionScopeCurrent(scope)) throw new DOMException("The peer session was replaced.", "AbortError");
       if ((audioTrack && !audioAttached) || (videoTrack && !videoAttached)) throw new Error(locale === "zh" ? "无法将媒体添加到端对端连接。" : "The media could not be added to the peer-to-peer connection.");
       const current = sharedPlaybackRef.current;
-      if (current?.id === id) updateSharedPlayback({
+      if (current?.id !== id || sharedPlaybackObjectUrlRef.current !== sourceUrl) throw new DOMException("The shared playback operation was replaced.", "AbortError");
+      updateSharedPlayback({
         ...current,
         duration: mediaDuration(element),
         kind: videoTrack ? "video" : "audio",
@@ -3101,10 +3176,26 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       sharedPlaybackTransitionRef.current = false;
       publishSharedPlaybackState(true);
     } catch (cause) {
+      capturedTracks.forEach((track) => track.stop());
+      const ownsPlayback = sharedPlaybackRef.current?.id === id && sharedPlaybackObjectUrlRef.current === sourceUrl;
+      if (isAbortError(cause)) {
+        if (ownsPlayback) {
+          updateSharedPlayback(null);
+          element.pause();
+          element.removeAttribute("src");
+          element.load();
+          URL.revokeObjectURL(sourceUrl);
+          sharedPlaybackObjectUrlRef.current = null;
+          sharedPlaybackTransitionRef.current = false;
+        }
+        return;
+      }
       const message = cause instanceof Error ? cause.message : locale === "zh" ? "无法打开所选媒体。" : "The selected media could not be opened.";
-      setSharedPlaybackError(message);
-      sharedPlaybackTransitionRef.current = false;
-      await clearLocalSharedPlayback(false);
+      if (isPeerSessionScopeCurrent(scope) && ownsPlayback) {
+        sharedPlaybackTransitionRef.current = false;
+        await clearLocalSharedPlayback(false);
+        if (isPeerSessionScopeCurrent(scope)) setSharedPlaybackError(message);
+      }
     }
   };
 
@@ -3208,7 +3299,49 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     if (element) element.volume = sharedPlaybackVolume;
   }, [sharedPlaybackVolume]);
 
+  const resetParticipantResources = (session: NativeWebRTCSession): boolean => {
+    if (sessionRef.current !== session) return false;
+    renewPeerSessionScope();
+    replaceCollaborationProvider(session);
+    if (peerTypingTimerRef.current !== null) window.clearTimeout(peerTypingTimerRef.current);
+    peerTypingTimerRef.current = null;
+    setPeerTyping(false);
+    chatMessagesRef.current = [];
+    setChatMessages([]);
+    if (fileTransferRefreshTimerRef.current !== null) window.clearTimeout(fileTransferRefreshTimerRef.current);
+    fileTransferRefreshTimerRef.current = null;
+    fileTransfersRef.current = [];
+    completedTransferIdsRef.current.clear();
+    setFileTransfers([]);
+    void fileManagerRef.current?.clearSession();
+    void clearLocalSharedPlayback(false);
+    if (sharedPlaybackRef.current?.owner === "remote") updateSharedPlayback(null);
+    session.media.stopLocalTracks();
+    rawMicrophoneTrackRef.current?.stop();
+    rawMicrophoneTrackRef.current = null;
+    cameraTrackRef.current?.stop();
+    cameraTrackRef.current = null;
+    screenVideoTrackRef.current?.stop();
+    screenVideoTrackRef.current = null;
+    screenAudioTrackRef.current?.stop();
+    screenAudioTrackRef.current = null;
+    setMicrophoneActive(false);
+    setMicrophoneDeviceId(null);
+    setMicrophoneError(null);
+    setMicrophonePending(false);
+    setCameraActive(false);
+    setCameraDeviceId(null);
+    setCameraPending(false);
+    setScreenShareActive(false);
+    setScreenAudioFallbackOpen(false);
+    setRemoteVoiceActive(false);
+    setRemoteVideoActive(false);
+    setConnectionRoute("direct");
+    return true;
+  };
+
   useEffect(() => {
+    renewPeerSessionScope();
     const showReconnectDialog = (detail = "Reconnecting signaling socket") => {
       setError(detail);
       setDialogPhase((current) => current === "ready" ? "closing-for-reconnect" : current === "closing-for-reconnect" ? current : "connecting");
@@ -3246,35 +3379,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         setDialogPhase("closing-for-full");
       },
       () => {
-        if (peerTypingTimerRef.current !== null) window.clearTimeout(peerTypingTimerRef.current);
-        peerTypingTimerRef.current = null;
-        setPeerTyping(false);
-        chatMessagesRef.current = [];
-        setChatMessages([]);
-        if (fileTransferRefreshTimerRef.current !== null) window.clearTimeout(fileTransferRefreshTimerRef.current);
-        fileTransferRefreshTimerRef.current = null;
-        fileTransfersRef.current = [];
-        setFileTransfers([]);
-        void fileManagerRef.current?.clearSession();
-        void clearLocalSharedPlayback(false);
-        if (sharedPlaybackRef.current?.owner === "remote") updateSharedPlayback(null);
-        session.media.stopLocalTracks();
-        rawMicrophoneTrackRef.current?.stop();
-        rawMicrophoneTrackRef.current = null;
-        cameraTrackRef.current?.stop();
-        cameraTrackRef.current = null;
-        screenVideoTrackRef.current?.stop();
-        screenVideoTrackRef.current = null;
-        screenAudioTrackRef.current?.stop();
-        screenAudioTrackRef.current = null;
-        setMicrophoneActive(false);
-        setMicrophoneDeviceId(null);
-        setCameraActive(false);
-        setCameraDeviceId(null);
-        setScreenShareActive(false);
-        setScreenAudioFallbackOpen(false);
-        setConnectionRoute("direct");
-        showReconnectDialog("Waiting for the other participant to reconnect");
+        if (resetParticipantResources(session)) showReconnectDialog("Waiting for the other participant to reconnect");
       },
       setConnectionRoute,
       (message) => {
@@ -3311,11 +3416,13 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         }
         if (status.state === "connected") setError(null);
       },
+      () => {
+        if (resetParticipantResources(session)) showReconnectDialog("Connecting to the new participant");
+      },
     );
     sessionRef.current = session;
     connectionReportedRef.current = false;
-    const provider = new P2PCollaborationProvider(session);
-    setCollaborationProvider(provider);
+    replaceCollaborationProvider(session);
     setMediaTransport(session.media);
     const unsubscribeMedia = session.media.subscribe((slots) => {
       const remoteAudio = slots.find((slot) => slot.id === "camera-audio");
@@ -3342,6 +3449,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     window.addEventListener("pageshow", handlePageShow);
 
     return () => {
+      disposePeerSessionScope();
       if (peerTypingTimerRef.current !== null) window.clearTimeout(peerTypingTimerRef.current);
       peerTypingTimerRef.current = null;
       window.removeEventListener("pagehide", handlePageHide);
@@ -3357,9 +3465,12 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       screenVideoTrackRef.current = null;
       screenAudioTrackRef.current?.stop();
       screenAudioTrackRef.current = null;
-      sessionRef.current = null;
-      provider.destroy();
-      setCollaborationProvider(null);
+      if (sessionRef.current === session) {
+        sessionRef.current = null;
+        collaborationProviderRef.current?.destroy();
+        collaborationProviderRef.current = null;
+        setCollaborationProvider(null);
+      }
       setMediaTransport(null);
       setMicrophoneActive(false);
       setMicrophoneDeviceId(null);
@@ -3382,6 +3493,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   }, [roomId]);
 
   const leave = () => {
+    disposePeerSessionScope();
     sessionRef.current?.close();
     chatMessagesRef.current = [];
     setChatMessages([]);
@@ -3466,8 +3578,9 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
 
   const toggleMicrophone = async () => {
     resumeRemoteAudio();
-    const media = sessionRef.current?.media;
-    if (!media || microphonePending) return;
+    const scope = capturePeerSessionScope();
+    if (!scope || microphonePending) return;
+    const { media } = scope;
 
     setMicrophonePending(true);
     setMicrophoneError(null);
@@ -3475,6 +3588,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       const existingTrack = media.getLocalTrack("camera-audio");
       if (existingTrack) {
         const removed = await media.replaceLocalTrack("camera-audio", null, "ended");
+        if (!isPeerSessionScopeCurrent(scope)) return;
         if (!removed) throw new Error(locale === "zh" ? "无法关闭麦克风。" : "Could not turn off the microphone.");
         existingTrack.stop();
         const rawTrack = rawMicrophoneTrackRef.current;
@@ -3493,30 +3607,48 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         },
         video: false,
       });
+      if (!isPeerSessionScopeCurrent(scope)) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       const track = stream.getAudioTracks()[0];
-      if (!track) throw new Error(locale === "zh" ? "没有检测到可用麦克风。" : "No microphone was detected.");
+      if (!track) {
+        stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+        throw new Error(locale === "zh" ? "没有检测到可用麦克风。" : "No microphone was detected.");
+      }
       const attached = await media.replaceLocalTrack("camera-audio", track, "live");
+      if (!isPeerSessionScopeCurrent(scope)) {
+        track.stop();
+        return;
+      }
       if (!attached) {
         track.stop();
         throw new Error(locale === "zh" ? "无法将麦克风接入端对端连接。" : "Could not add the microphone to the peer-to-peer connection.");
       }
-      track.addEventListener("ended", () => setMicrophoneActive(false), { once: true });
       rawMicrophoneTrackRef.current = track;
+      track.addEventListener("ended", () => {
+        if (!isPeerSessionScopeCurrent(scope) || rawMicrophoneTrackRef.current !== track) return;
+        rawMicrophoneTrackRef.current = null;
+        setMicrophoneActive(false);
+        setMicrophoneDeviceId(null);
+      }, { once: true });
       setMicrophoneActive(true);
       setMicrophoneDeviceId(track.getSettings().deviceId ?? null);
       trackInsightEvent("microphone_started");
       reportFeatureUsage("voice");
     } catch (cause) {
+      if (!isPeerSessionScopeCurrent(scope) || isAbortError(cause)) return;
       setMicrophoneActive(false);
       setMicrophoneError(cause instanceof Error ? cause.message : locale === "zh" ? "无法开启麦克风。" : "Could not turn on the microphone.");
     } finally {
-      setMicrophonePending(false);
+      if (isPeerSessionScopeCurrent(scope)) setMicrophonePending(false);
     }
   };
 
   const selectMicrophone = async (deviceId: string): Promise<boolean> => {
-    const media = sessionRef.current?.media;
-    if (!media || microphonePending) return false;
+    const scope = capturePeerSessionScope();
+    if (!scope || microphonePending) return false;
+    const { media } = scope;
 
     setMicrophonePending(true);
     setMicrophoneError(null);
@@ -3530,11 +3662,22 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         },
         video: false,
       });
+      if (!isPeerSessionScopeCurrent(scope)) {
+        stream.getTracks().forEach((track) => track.stop());
+        return false;
+      }
       const replacement = stream.getAudioTracks()[0];
-      if (!replacement) throw new Error(locale === "zh" ? "没有检测到可用麦克风。" : "No microphone was detected.");
+      if (!replacement) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new Error(locale === "zh" ? "没有检测到可用麦克风。" : "No microphone was detected.");
+      }
       const previous = media.getLocalTrack("camera-audio");
       const previousRawTrack = rawMicrophoneTrackRef.current;
       const attached = await media.replaceLocalTrack("camera-audio", replacement, "live");
+      if (!isPeerSessionScopeCurrent(scope)) {
+        replacement.stop();
+        return false;
+      }
       if (!attached) {
         replacement.stop();
         throw new Error(locale === "zh" ? "无法切换麦克风。" : "Could not switch microphones.");
@@ -3542,21 +3685,28 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       previous?.stop();
       if (previousRawTrack && previousRawTrack !== previous) previousRawTrack.stop();
       rawMicrophoneTrackRef.current = replacement;
-      replacement.addEventListener("ended", () => setMicrophoneActive(false), { once: true });
+      replacement.addEventListener("ended", () => {
+        if (!isPeerSessionScopeCurrent(scope) || rawMicrophoneTrackRef.current !== replacement) return;
+        rawMicrophoneTrackRef.current = null;
+        setMicrophoneActive(false);
+        setMicrophoneDeviceId(null);
+      }, { once: true });
       setMicrophoneActive(true);
       setMicrophoneDeviceId(replacement.getSettings().deviceId ?? deviceId);
       return true;
     } catch (cause) {
+      if (!isPeerSessionScopeCurrent(scope) || isAbortError(cause)) return false;
       setMicrophoneError(cause instanceof Error ? cause.message : locale === "zh" ? "无法切换麦克风。" : "Could not switch microphones.");
       return false;
     } finally {
-      setMicrophonePending(false);
+      if (isPeerSessionScopeCurrent(scope)) setMicrophonePending(false);
     }
   };
 
   const toggleNoiseReduction = async () => {
-    const track = rawMicrophoneTrackRef.current ?? sessionRef.current?.media.getLocalTrack("camera-audio");
-    if (!track || microphonePending) return;
+    const scope = capturePeerSessionScope();
+    const track = rawMicrophoneTrackRef.current ?? scope?.media.getLocalTrack("camera-audio");
+    if (!scope || !track || microphonePending) return;
 
     const next = !noiseReductionActive;
     setMicrophonePending(true);
@@ -3568,11 +3718,14 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
           noiseSuppression: next,
         }],
       });
+      const currentTrack = rawMicrophoneTrackRef.current ?? scope.media.getLocalTrack("camera-audio");
+      if (!isPeerSessionScopeCurrent(scope) || currentTrack !== track) return;
       setNoiseReductionActive(next);
     } catch (cause) {
+      if (!isPeerSessionScopeCurrent(scope) || isAbortError(cause)) return;
       setMicrophoneError(cause instanceof Error ? cause.message : locale === "zh" ? "无法修改降噪设置。" : "Could not update noise reduction.");
     } finally {
-      setMicrophonePending(false);
+      if (isPeerSessionScopeCurrent(scope)) setMicrophonePending(false);
     }
   };
 
@@ -3584,8 +3737,9 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
 
   const updateVideoQuality = async (quality: VideoQuality) => {
     setVideoQuality(quality);
+    const scope = capturePeerSessionScope();
     const track = cameraTrackRef.current;
-    if (!track) return;
+    if (!scope || !track) return;
     try {
       await track.applyConstraints(videoConstraints(quality));
     } catch {
@@ -3594,13 +3748,15 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   };
 
   const toggleCamera = async () => {
-    const media = sessionRef.current?.media;
-    if (!media || cameraPending) return;
+    const scope = capturePeerSessionScope();
+    if (!scope || cameraPending) return;
+    const { media } = scope;
     setCameraPending(true);
     try {
       const existing = media.getLocalTrack("camera-video");
       if (existing) {
         const detached = await media.replaceLocalTrack("camera-video", null, "ended");
+        if (!isPeerSessionScopeCurrent(scope)) return;
         if (!detached) return;
         existing.stop();
         cameraTrackRef.current = null;
@@ -3609,13 +3765,27 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         return;
       }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoConstraints(videoQuality) });
+      if (!isPeerSessionScopeCurrent(scope)) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       const track = stream.getVideoTracks()[0];
-      if (!track || !await media.replaceLocalTrack("camera-video", track, "live")) {
+      if (!track) {
+        stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+        return;
+      }
+      const attached = await media.replaceLocalTrack("camera-video", track, "live");
+      if (!isPeerSessionScopeCurrent(scope)) {
+        track.stop();
+        return;
+      }
+      if (!attached) {
         track?.stop();
         return;
       }
       cameraTrackRef.current = track;
       track.addEventListener("ended", () => {
+        if (!isPeerSessionScopeCurrent(scope) || cameraTrackRef.current !== track) return;
         cameraTrackRef.current = null;
         setCameraActive(false);
         setCameraDeviceId(null);
@@ -3626,18 +3796,32 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       trackInsightEvent("camera_started", { quality: videoQuality });
       reportFeatureUsage("camera");
     } finally {
-      setCameraPending(false);
+      if (isPeerSessionScopeCurrent(scope)) setCameraPending(false);
     }
   };
 
   const selectCamera = async (deviceId: string): Promise<boolean> => {
-    const media = sessionRef.current?.media;
-    if (!media || cameraPending) return false;
+    const scope = capturePeerSessionScope();
+    if (!scope || cameraPending) return false;
+    const { media } = scope;
     setCameraPending(true);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...videoConstraints(videoQuality), deviceId: { exact: deviceId } } });
+      if (!isPeerSessionScopeCurrent(scope)) {
+        stream.getTracks().forEach((track) => track.stop());
+        return false;
+      }
       const track = stream.getVideoTracks()[0];
-      if (!track || !await media.replaceLocalTrack("camera-video", track, "live")) {
+      if (!track) {
+        stream.getTracks().forEach((streamTrack) => streamTrack.stop());
+        return false;
+      }
+      const attached = await media.replaceLocalTrack("camera-video", track, "live");
+      if (!isPeerSessionScopeCurrent(scope)) {
+        track.stop();
+        return false;
+      }
+      if (!attached) {
         track?.stop();
         return false;
       }
@@ -3645,7 +3829,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       cameraTrackRef.current = track;
       previous?.stop();
       track.addEventListener("ended", () => {
-        if (cameraTrackRef.current !== track) return;
+        if (!isPeerSessionScopeCurrent(scope) || cameraTrackRef.current !== track) return;
         cameraTrackRef.current = null;
         setCameraActive(false);
         setCameraDeviceId(null);
@@ -3655,13 +3839,14 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       setCameraDeviceId(track.getSettings().deviceId ?? deviceId);
       return true;
     } finally {
-      setCameraPending(false);
+      if (isPeerSessionScopeCurrent(scope)) setCameraPending(false);
     }
   };
 
   const startScreenShare = async (withAudio: boolean) => {
-    const media = sessionRef.current?.media;
-    if (!media || cameraPending) return;
+    const scope = capturePeerSessionScope();
+    if (!scope || cameraPending) return;
+    const { media } = scope;
     setCameraPending(true);
     try {
       let stream: MediaStream;
@@ -3671,27 +3856,50 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         // through the portable display-capture shape.
         stream = await navigator.mediaDevices.getDisplayMedia({ audio: withAudio, video: true });
       } catch (cause) {
+        if (!isPeerSessionScopeCurrent(scope)) return;
         const message = cause instanceof Error ? cause.message : "";
         const audioSourceFailed = /audio source|audio capture|system audio/i.test(message);
-        if (withAudio && audioSourceFailed) {
+        if (withAudio && audioSourceFailed && isPeerSessionScopeCurrent(scope)) {
           setScreenAudioFallbackOpen(true);
           return;
         }
         throw cause;
       }
-      const video = stream.getVideoTracks()[0];
-      const audio = stream.getAudioTracks()[0] ?? null;
-      if (!video || !await media.replaceLocalTrack("screen-video", video, "live")) {
+      if (!isPeerSessionScopeCurrent(scope)) {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
-      if (audio && !await media.replaceLocalTrack("screen-audio", audio, "live")) {
-        audio.stop();
+      const video = stream.getVideoTracks()[0];
+      const audio = stream.getAudioTracks()[0] ?? null;
+      if (!video) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      const videoAttached = await media.replaceLocalTrack("screen-video", video, "live");
+      if (!isPeerSessionScopeCurrent(scope)) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      if (!videoAttached) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      let activeAudio: MediaStreamTrack | null = audio;
+      if (audio) {
+        const audioAttached = await media.replaceLocalTrack("screen-audio", audio, "live");
+        if (!isPeerSessionScopeCurrent(scope)) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        if (!audioAttached) {
+          audio.stop();
+          activeAudio = null;
+        }
       }
       screenVideoTrackRef.current = video;
-      screenAudioTrackRef.current = audio?.readyState === "live" ? audio : null;
+      screenAudioTrackRef.current = activeAudio?.readyState === "live" ? activeAudio : null;
       video.addEventListener("ended", () => {
-        if (screenVideoTrackRef.current !== video) return;
+        if (!isPeerSessionScopeCurrent(scope) || screenVideoTrackRef.current !== video) return;
         screenVideoTrackRef.current = null;
         screenAudioTrackRef.current?.stop();
         screenAudioTrackRef.current = null;
@@ -3703,13 +3911,14 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       trackInsightEvent("screen_share_started", { includes_audio: Boolean(screenAudioTrackRef.current) });
       reportFeatureUsage("screen_share");
     } finally {
-      setCameraPending(false);
+      if (isPeerSessionScopeCurrent(scope)) setCameraPending(false);
     }
   };
 
   const toggleScreenShare = async () => {
-    const media = sessionRef.current?.media;
-    if (!media || cameraPending) return;
+    const scope = capturePeerSessionScope();
+    if (!scope || cameraPending) return;
+    const { media } = scope;
     if (!media.getLocalTrack("screen-video")) {
       await startScreenShare(true);
       return;
@@ -3720,6 +3929,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         media.replaceLocalTrack("screen-video", null, "ended"),
         media.replaceLocalTrack("screen-audio", null, "ended"),
       ]);
+      if (!isPeerSessionScopeCurrent(scope)) return;
       if (!videoRemoved || !audioRemoved) return;
       screenVideoTrackRef.current?.stop();
       screenAudioTrackRef.current?.stop();
@@ -3727,7 +3937,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       screenAudioTrackRef.current = null;
       setScreenShareActive(false);
     } finally {
-      setCameraPending(false);
+      if (isPeerSessionScopeCurrent(scope)) setCameraPending(false);
     }
   };
 

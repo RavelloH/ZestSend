@@ -563,6 +563,8 @@ export class NativeWebRTCSession {
   private remoteParticipantJoined = false;
   private remoteSignalingDisconnected = false;
   private remoteSlotId: string | null = null;
+  // The stable slot survives RTC peer-session rotations and transport suspension.
+  private rememberedRemoteSlotId: string | null = null;
   private remotePeerSessionId: string | null = null;
   private initiator = false;
   private slotId: string | null = null;
@@ -607,6 +609,7 @@ export class NativeWebRTCSession {
     private readonly onChatTyping: () => void,
     private readonly onSharedPlaybackMessage: (message: SharedPlaybackMessage) => void,
     private readonly onStatus: (status: SessionStatus) => void = () => undefined,
+    private readonly onPeerReplaced: () => void = () => undefined,
   ) {
     this.resumeToken = v2ReadResumeToken(roomId);
     this.mediaTransport = new MediaTransport(
@@ -985,7 +988,7 @@ export class NativeWebRTCSession {
         this.epoch = eventEpoch;
         this.pendingSignals = [];
       }
-      this.remoteParticipantJoined = false; this.remoteSlotId = null; this.remotePeerSessionId = null;
+      this.remoteParticipantJoined = false; this.remoteSlotId = null; this.rememberedRemoteSlotId = null; this.remotePeerSessionId = null;
       this.remoteSignalingDisconnected = false;
       this.stopDataChannelLatencyProbe(); this.closeDataChannels(); this.mediaTransport.detachPeer();
       this.peer?.close(); this.peer = null; this.peerRestarting = false; this.connectedNotified = false;
@@ -1015,14 +1018,20 @@ export class NativeWebRTCSession {
     const announcedPeerSessionId = message.peerSessionId;
     const peerFromList = message.peers?.find((peer) => peer.slotId && peer.slotId !== this.slotId);
     if (announcedSlotId && announcedSlotId !== this.slotId) {
-      this.remoteSlotId = announcedSlotId;
-      this.remotePeerSessionId = announcedPeerSessionId ?? this.remotePeerSessionId;
+      this.updateRemoteIdentity(announcedSlotId, announcedPeerSessionId);
     } else if (peerFromList?.slotId) {
-      this.remoteSlotId = peerFromList.slotId;
-      this.remotePeerSessionId = peerFromList.peerSessionId ?? this.remotePeerSessionId;
+      this.updateRemoteIdentity(peerFromList.slotId, peerFromList.peerSessionId);
     }
     if (message.offererSlotId) { this.offererSlotId = message.offererSlotId; this.initiator = this.offererSlotId === this.slotId; }
     return true;
+  }
+
+  private updateRemoteIdentity(slotId: string, peerSessionId?: string): void {
+    const replaced = this.rememberedRemoteSlotId !== null && this.rememberedRemoteSlotId !== slotId;
+    this.remoteSlotId = slotId;
+    this.rememberedRemoteSlotId = slotId;
+    this.remotePeerSessionId = peerSessionId ?? this.remotePeerSessionId;
+    if (replaced) this.onPeerReplaced();
   }
 
   private acceptSignal(signal: V2Signal): boolean {
