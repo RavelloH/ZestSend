@@ -76,6 +76,8 @@ type ReceiverBlock = BlockMeta & { received: number };
 
 type FileRecord = FileTransferSnapshot & {
   generation: number;
+  receiverId: string;
+  receiverInitialization?: Promise<void>;
   file?: File;
   blockHashes: string[];
   completedBlocks: Set<number>;
@@ -151,6 +153,12 @@ function pendingWorkerOperation(): PendingWorkerOperation {
   return { promise, reject, resolve };
 }
 
+function randomIdentifier(): string {
+  return typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 function asRecord(file: File, direction: FileTransferDirection, id: string, generation: number): FileRecord {
   return {
     confirmedBytes: 0,
@@ -175,6 +183,7 @@ function asRecord(file: File, direction: FileTransferDirection, id: string, gene
     blockSizes: new Map(),
     inFlightBytes: 0,
     remoteCredit: FILE_INITIAL_CREDIT,
+    receiverId: randomIdentifier(),
     paused: false,
     sendTasks: new Map(),
     writeChain: Promise.resolve(),
@@ -252,9 +261,9 @@ export class FileTransferManager {
       else if (message.type === "receiver-closed" || message.type === "receiver-discarded") this.receiverClosed.get(message.transferId)?.resolve();
       else if (message.type === "block-written" && typeof message.blockIndex === "number" && typeof message.byteLength === "number") void this.completeReceivedBlock(message as { blockIndex: number; byteLength: number; transferId: string });
       else if (message.type === "block-invalid" && typeof message.blockIndex === "number") {
-        const record = this.files.get(message.transferId);
+        const record = this.findRecordByReceiverId(message.transferId);
         if (record && record.direction === "incoming" && record.state === "transferring" && this.isCurrentRecord(record)) {
-          this.callbacks.sendControl({ type: "BLOCK_NACK", transferId: message.transferId, blockIndex: message.blockIndex });
+          this.callbacks.sendControl({ type: "BLOCK_NACK", transferId: record.id, blockIndex: message.blockIndex });
         }
       }
       else if (message.type === "receiver-error") {
@@ -264,7 +273,7 @@ export class FileTransferManager {
         if (pending) pending.reject(error);
         else if (closing) closing.reject(error);
         else {
-          const record = this.files.get(message.transferId);
+          const record = this.findRecordByReceiverId(message.transferId);
           if (record && this.isCurrentRecord(record)) this.fail(record, this.storageErrorMessage(error));
         }
       }
@@ -333,6 +342,7 @@ export class FileTransferManager {
     for (const record of records) {
       record.file = undefined;
       record.fileHandle = undefined;
+      record.receiverInitialization = undefined;
       record.target = undefined;
       record.chunks.clear();
       record.blockHashes.length = 0;
@@ -350,6 +360,13 @@ export class FileTransferManager {
     return !this.disposed
       && record.generation === this.sessionGeneration
       && this.files.get(record.id) === record;
+  }
+
+  private findRecordByReceiverId(receiverId: string): FileRecord | undefined {
+    for (const record of this.files.values()) {
+      if (record.receiverId === receiverId) return record;
+    }
+    return undefined;
   }
 
   private isActiveIncomingOffer(record: FileRecord, generation: number, signal: AbortSignal): boolean {
@@ -479,6 +496,7 @@ export class FileTransferManager {
         this.callbacks.onOffer(this.snapshot(existing));
         return;
       }
+      if (existing) return;
       const fake = new File([], message.name, { type: typeof message.mimeType === "string" ? message.mimeType : "application/octet-stream" });
       const record = asRecord(fake, "incoming", id, this.sessionGeneration);
       record.size = message.size;
@@ -523,7 +541,7 @@ export class FileTransferManager {
       });
       const pending = record.pendingCompleted.get(message.blockIndex);
       if (pending) record.pendingCompleted.delete(message.blockIndex);
-      this.worker.postMessage({ type: "meta", transferId: record.id, blockIndex: message.blockIndex, hash: message.hash });
+      this.worker.postMessage({ type: "meta", transferId: record.receiverId, blockIndex: message.blockIndex, hash: message.hash });
       return;
     }
     if (message.type === "FILE_ACCEPT" && record.direction === "outgoing") {
@@ -589,7 +607,7 @@ export class FileTransferManager {
     record.transferredBytes = Math.min(record.size, record.transferredBytes + segment.payload.byteLength);
     this.updateRate(record);
     this.emit(record);
-    this.worker.postMessage({ ...segment, type: "segment" }, [segment.payload]);
+    this.worker.postMessage({ ...segment, transferId: record.receiverId, type: "segment" }, [segment.payload]);
   }
 
   async acceptFile(id: string): Promise<boolean> {
@@ -617,7 +635,14 @@ export class FileTransferManager {
       return false;
     }
     try {
-      record.target = await this.createTarget(record, generation, signal);
+      const target = this.createTarget(record, generation, signal);
+      const initialization = target.then(() => undefined, () => undefined);
+      record.receiverInitialization = initialization;
+      try {
+        record.target = await target;
+      } finally {
+        if (record.receiverInitialization === initialization) record.receiverInitialization = undefined;
+      }
       if (!this.isActiveIncomingOffer(record, generation, signal)) {
         void this.removeTemporaryFile(record);
         return false;
@@ -773,7 +798,7 @@ export class FileTransferManager {
   }
 
   private async completeReceivedBlock(result: { blockIndex: number; byteLength: number; transferId: string }): Promise<void> {
-    const record = this.files.get(result.transferId);
+    const record = this.findRecordByReceiverId(result.transferId);
     if (!record || record.direction !== "incoming" || record.state !== "transferring" || !this.isCurrentRecord(record)) return;
     const generation = this.sessionGeneration;
     const signal = this.sessionAbortController.signal;
@@ -844,8 +869,8 @@ export class FileTransferManager {
         const handle = await root.getFileHandle(targetName, { create: true });
         if (!this.isActiveIncomingOffer(record, generation, signal)) throw abortError();
         record.fileHandle = handle;
-        await this.waitForWorkerOperation(this.receiverReady, record.id, worker, signal, () => {
-          worker.postMessage({ type: "initialize", transferId: record.id, targetName });
+        await this.waitForWorkerOperation(this.receiverReady, record.receiverId, worker, signal, () => {
+          worker.postMessage({ type: "initialize", transferId: record.receiverId, targetName });
         });
         if (!this.isActiveIncomingOffer(record, generation, signal)) throw abortError();
         return undefined;
@@ -873,8 +898,8 @@ export class FileTransferManager {
     if (!record.targetName) return;
     if (!this.isActiveIncomingTransfer(record, generation, signal)) throw abortError();
     const worker = this.worker;
-    await this.waitForWorkerOperation(this.receiverClosed, record.id, worker, signal, () => {
-      worker.postMessage({ type: "close", transferId: record.id });
+    await this.waitForWorkerOperation(this.receiverClosed, record.receiverId, worker, signal, () => {
+      worker.postMessage({ type: "close", transferId: record.receiverId });
     });
   }
 
@@ -902,10 +927,7 @@ export class FileTransferManager {
   }
 
   private temporaryFileName(): string {
-    const nonce = typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    return `${FILE_TEMP_PREFIX}${nonce}${FILE_TEMP_SUFFIX}`;
+    return `${FILE_TEMP_PREFIX}${randomIdentifier()}${FILE_TEMP_SUFFIX}`;
   }
 
   private storageErrorMessage(error: unknown): string {
@@ -948,8 +970,10 @@ export class FileTransferManager {
     try {
       await record.writeChain.catch(() => undefined);
       if (this.disposed || worker !== this.worker || record.generation !== this.sessionGeneration || signal.aborted) throw abortError();
-      await this.waitForWorkerOperation(this.receiverClosed, record.id, worker, signal, () => {
-        worker.postMessage({ type: "discard", transferId: record.id, targetName });
+      await record.receiverInitialization?.catch(() => undefined);
+      if (this.disposed || worker !== this.worker || record.generation !== this.sessionGeneration || signal.aborted) throw abortError();
+      await this.waitForWorkerOperation(this.receiverClosed, record.receiverId, worker, signal, () => {
+        worker.postMessage({ type: "discard", transferId: record.receiverId, targetName });
       });
       discarded = true;
     } catch (error) {
@@ -1018,7 +1042,7 @@ export class FileTransferManager {
   }
 
   private snapshot(record: FileRecord): FileTransferSnapshot {
-    const { file: _file, fileHandle: _handle, targetName: _targetName, transferStartedAt: _transferStartedAt, throughputEwma: _throughputEwma, completedBlocks: _blocks, receiverBlocks: _receiver, chunks: _chunks, retryCount: _retry, target: _target, blockHashes: _hashes, inFlightBlocks: _inFlight, pendingCompleted: _pending, nextBlockIndex: _next, blockSizes: _sizes, inFlightBytes: _inFlightBytes, remoteCredit: _credit, writeChain: _writeChain, generation: _generation, sendTasks: _sendTasks, ...snapshot } = record;
+    const { file: _file, fileHandle: _handle, targetName: _targetName, transferStartedAt: _transferStartedAt, throughputEwma: _throughputEwma, completedBlocks: _blocks, receiverBlocks: _receiver, chunks: _chunks, retryCount: _retry, target: _target, blockHashes: _hashes, inFlightBlocks: _inFlight, pendingCompleted: _pending, nextBlockIndex: _next, blockSizes: _sizes, inFlightBytes: _inFlightBytes, remoteCredit: _credit, writeChain: _writeChain, generation: _generation, receiverId: _receiverId, receiverInitialization: _receiverInitialization, sendTasks: _sendTasks, ...snapshot } = record;
     return snapshot;
   }
 
