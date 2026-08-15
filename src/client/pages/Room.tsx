@@ -2650,7 +2650,7 @@ function RoomWorkspace({
                     ) : activeWorkspace === "collaborate" ? (
                       <CollaborationWorkspace accent={theme.accent} locale={locale} onFeatureUsed={() => onFeatureUsed("collaborate")} provider={collaborationProvider} />
                     ) : activeWorkspace === "canvas" ? (
-                      <CollaborationCanvas accent={theme.accent} locale={locale} onFeatureUsed={() => onFeatureUsed("canvas")} provider={collaborationProvider} />
+                      <CollaborationCanvas accent={theme.accent} key={collaborationProvider?.document.clientID ?? "pending"} locale={locale} onFeatureUsed={() => onFeatureUsed("canvas")} provider={collaborationProvider} />
                     ) : activeWorkspace === "status" ? (
                       <div className="flex h-full min-h-0 w-full max-w-2xl flex-col pb-[clamp(6rem,7vh,7rem)] pt-6 lg:max-w-3xl">
                         <OverlayScrollbar
@@ -2799,6 +2799,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const usedFeaturesRef = useRef(new Set<MeasuredFeature>());
   const [canvasHasContent, setCanvasHasContent] = useState(false);
   const [collaborationProvider, setCollaborationProvider] = useState<P2PCollaborationProvider | null>(null);
+  const collaborationProviderRef = useRef<P2PCollaborationProvider | null>(null);
   const [collaborationPeerCursor, setCollaborationPeerCursor] = useState(false);
   const [mediaTransport, setMediaTransport] = useState<MediaTransport | null>(null);
   const [microphoneActive, setMicrophoneActive] = useState(false);
@@ -2886,6 +2887,14 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const sessionRef = useRef<NativeWebRTCSession | null>(null);
   const fileManagerRef = useRef<FileTransferManager | null>(null);
   const lastTypingSentAtRef = useRef(0);
+
+  const replaceCollaborationProvider = (session: NativeWebRTCSession) => {
+    if (sessionRef.current !== session) return;
+    collaborationProviderRef.current?.destroy();
+    const provider = new P2PCollaborationProvider(session);
+    collaborationProviderRef.current = provider;
+    setCollaborationProvider(provider);
+  };
 
   const reportFeatureUsage = (feature: MeasuredFeature) => {
     if (usedFeaturesRef.current.has(feature)) return;
@@ -3246,6 +3255,8 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
         setDialogPhase("closing-for-full");
       },
       () => {
+        if (sessionRef.current !== session) return;
+        replaceCollaborationProvider(session);
         if (peerTypingTimerRef.current !== null) window.clearTimeout(peerTypingTimerRef.current);
         peerTypingTimerRef.current = null;
         setPeerTyping(false);
@@ -3314,8 +3325,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
     );
     sessionRef.current = session;
     connectionReportedRef.current = false;
-    const provider = new P2PCollaborationProvider(session);
-    setCollaborationProvider(provider);
+    replaceCollaborationProvider(session);
     setMediaTransport(session.media);
     const unsubscribeMedia = session.media.subscribe((slots) => {
       const remoteAudio = slots.find((slot) => slot.id === "camera-audio");
@@ -3357,9 +3367,12 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       screenVideoTrackRef.current = null;
       screenAudioTrackRef.current?.stop();
       screenAudioTrackRef.current = null;
-      sessionRef.current = null;
-      provider.destroy();
-      setCollaborationProvider(null);
+      if (sessionRef.current === session) {
+        sessionRef.current = null;
+        collaborationProviderRef.current?.destroy();
+        collaborationProviderRef.current = null;
+        setCollaborationProvider(null);
+      }
       setMediaTransport(null);
       setMicrophoneActive(false);
       setMicrophoneDeviceId(null);
