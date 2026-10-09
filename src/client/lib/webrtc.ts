@@ -44,6 +44,14 @@ export type WebRTCTransportDiagnostics = {
 import type { FileTransferManager, FileTransferSnapshot } from "./file-transfer";
 import { MediaTransport, type MediaSlotControlMessage } from "./media-transport";
 import { isSharedPlaybackMessage, type SharedPlaybackMessage } from "./shared-playback";
+import {
+  ROOM_DISCONNECTED_LEASE_MS,
+  SIGNALING_HEARTBEAT_CAPABILITY,
+  SIGNALING_HEARTBEAT_INTERVAL_MS,
+  SIGNALING_HEARTBEAT_REQUEST,
+  SIGNALING_HEARTBEAT_RESPONSE,
+  type SignalingHeartbeatProtocol,
+} from "../../shared/signaling-protocol";
 
 type SignalMessage = {
   epoch?: number;
@@ -58,9 +66,12 @@ type SignalMessage = {
 
 export type SessionStatus = {
   detail?: string;
+  phase?: SessionPhase;
   retryAfterMs?: number;
   state: "connecting" | "connected" | "reconnecting" | "reserved" | "closed";
 };
+
+export type SessionPhase = "WAITING" | "NEGOTIATING" | "P2P_ACTIVE" | "RECOVERING" | "CLOSED";
 
 type DataChannelPingMessage = {
   id: string;
@@ -127,6 +138,7 @@ type ServerMessage =
       resumed?: boolean;
       resumeToken?: string;
       slotId?: string;
+      heartbeatProtocol?: SignalingHeartbeatProtocol;
       type: "welcome";
     }
   | { epoch?: number; offererSlotId?: string; peerId?: string; peerSessionId?: string; slotId?: string; type: "peer-ready" }
@@ -509,8 +521,8 @@ export function stopObservingIceServers(listener: IcePreparationListener): void 
 
 
 const V2_RECONNECT_DELAYS = [250, 500, 1_000, 2_000, 4_000, 5_000] as const;
-const V2_HEARTBEAT_INTERVAL = 5_000;
-const V2_MAX_HEARTBEAT_MISSES = 3;
+const MAX_SIGNALING_HEARTBEAT_MISSES = 4;
+const SEAT_LEASE_LOCAL_GRACE_MS = 5_000;
 type V2HelloMode = "new" | "resume-signaling" | "restart-peer";
 
 function v2ResumeKey(roomId: string): string {
@@ -552,6 +564,9 @@ export class NativeWebRTCSession {
   private closed = false;
   private suspended = false;
   private leaving = false;
+  private lifecyclePhase: SessionPhase = "WAITING";
+  private latestStatus: SessionStatus = { phase: "WAITING", state: "connecting" };
+  private hasAdmittedSeat = false;
   private peer: RTCPeerConnection | null = null;
   private peerGeneration = 0;
   private peerRestarting = false;
@@ -585,6 +600,8 @@ export class NativeWebRTCSession {
   private heartbeatTimer: number | undefined;
   private heartbeatStartedAt: number | null = null;
   private heartbeatMisses = 0;
+  private heartbeatProtocol: SignalingHeartbeatProtocol = "legacy-json";
+  private seatLeaseTimer: number | undefined;
   private leaveAckTimer: number | undefined;
   private progress = initialProgress();
   private dataChannelPingStartedAt: number | null = null;
@@ -621,7 +638,8 @@ export class NativeWebRTCSession {
 
   connect(): void {
     if (this.closed || this.suspended) return;
-    this.onStatus({ detail: "Opening signaling socket", state: "connecting" });
+    this.setLifecyclePhase("WAITING");
+    this.reportStatus({ detail: "Opening signaling socket", state: "connecting" });
     void this.prepareIceServers();
     this.openSocket(this.resumeToken ? "resume-signaling" : "new", true);
   }
@@ -633,6 +651,8 @@ export class NativeWebRTCSession {
   suspend(): void {
     if (this.closed || this.suspended) return;
     this.suspended = true;
+    this.clearSeatLeaseTimer();
+    this.setLifecyclePhase("RECOVERING");
     this.clearReconnectTimer();
     this.stopHeartbeat();
     this.stopDataChannelLatencyProbe();
@@ -659,6 +679,7 @@ export class NativeWebRTCSession {
   resume(): void {
     if (this.closed || !this.suspended) return;
     this.suspended = false;
+    this.setLifecyclePhase("RECOVERING");
     if (!this.readyForPeerConnection) {
       if (this.icePreparationListener) stopObservingIceServers(this.icePreparationListener);
       this.icePreparationListener = null;
@@ -668,7 +689,7 @@ export class NativeWebRTCSession {
     this.remoteSignalingDisconnected = false;
     this.remoteSlotId = null;
     this.remotePeerSessionId = null;
-    this.onStatus({ detail: "Reconnecting signaling socket", state: "reconnecting" });
+    this.reportStatus({ detail: "Reconnecting signaling socket", state: "reconnecting" });
     void this.prepareIceServers();
     this.openSocket(this.resumeToken ? "resume-signaling" : "new", true);
   }
@@ -679,7 +700,8 @@ export class NativeWebRTCSession {
     if (this.closed && !this.socket) return;
     this.closed = true;
     this.leaving = true;
-    this.onStatus({ state: "closed" });
+    this.setLifecyclePhase("CLOSED");
+    this.reportStatus({ state: "closed" });
     this.clearReconnectTimer();
     this.stopHeartbeat();
     this.stopDataChannelLatencyProbe();
@@ -694,6 +716,7 @@ export class NativeWebRTCSession {
   private finishClose(preserveResumeToken = false): void {
     const sessionResumeToken = this.resumeToken;
     this.clearReconnectTimer();
+    this.clearSeatLeaseTimer();
     if (this.leaveAckTimer !== undefined) {
       window.clearTimeout(this.leaveAckTimer);
       this.leaveAckTimer = undefined;
@@ -712,6 +735,8 @@ export class NativeWebRTCSession {
     this.socket = null;
     this.leaving = false;
     this.suspended = false;
+    this.hasAdmittedSeat = false;
+    this.setLifecyclePhase("CLOSED");
     if (!preserveResumeToken) {
       // A remounted session can rotate the shared tab token while an older
       // session is still waiting for its leave acknowledgement. Only clear
@@ -733,6 +758,19 @@ export class NativeWebRTCSession {
   get dataChannel(): RTCDataChannel | null { return this.channels.interactive; }
   get collaborationReady(): boolean { return this.channels.collaboration?.readyState === "open"; }
   get media(): MediaTransport { return this.mediaTransport; }
+  get phase(): SessionPhase { return this.lifecyclePhase; }
+
+  private setLifecyclePhase(phase: SessionPhase): void {
+    if (phase === this.lifecyclePhase) return;
+    this.lifecyclePhase = phase;
+    this.latestStatus = { ...this.latestStatus, phase };
+    this.onStatus({ ...this.latestStatus });
+  }
+
+  private reportStatus(status: SessionStatus): void {
+    this.latestStatus = { ...this.latestStatus, ...status, phase: this.lifecyclePhase };
+    this.onStatus({ ...this.latestStatus });
+  }
 
   subscribeCollaboration(listener: (data: ArrayBuffer) => void): () => void {
     this.collaborationListeners.add(listener);
@@ -849,8 +887,12 @@ export class NativeWebRTCSession {
         if (generation !== this.socketGeneration || this.closed || this.suspended) return;
         this.setStep("websocket", { state: "active", detail: "Signaling socket connected" });
         const token = mode === "new" ? undefined : this.resumeToken ?? undefined;
-        this.sendSocket({ type: "hello", mode, ...(token ? { resumeToken: token } : {}) });
-        this.startHeartbeat(generation);
+        this.sendSocket({
+          type: "hello",
+          mode,
+          ...(token ? { resumeToken: token } : {}),
+          capabilities: [SIGNALING_HEARTBEAT_CAPABILITY],
+        });
         void this.prepareIceServers();
       };
       socket.onmessage = (event) => {
@@ -867,6 +909,10 @@ export class NativeWebRTCSession {
         if (generation !== this.socketGeneration) return;
         this.stopHeartbeat(); this.socket = null;
         if (this.closed || this.suspended) return;
+        if (this.hasAdmittedSeat) {
+          if (this.lifecyclePhase !== "P2P_ACTIVE") this.setLifecyclePhase("RECOVERING");
+          this.scheduleSeatLeaseExpiry();
+        }
         this.setStep("websocket", { state: "checking", detail: "Signaling socket closed" });
         this.scheduleSocketReconnect(this.reconnectMode);
       };
@@ -874,10 +920,18 @@ export class NativeWebRTCSession {
   }
 
   private handleSocketMessage(rawMessage: string): void {
+    if (rawMessage === SIGNALING_HEARTBEAT_RESPONSE) {
+      this.handleSignalingHeartbeatResponse();
+      return;
+    }
     let message: ServerMessage;
     try { message = JSON.parse(rawMessage) as ServerMessage; } catch { return; }
     if (message.type === "welcome") {
       const oldEpoch = this.epoch;
+      this.hasAdmittedSeat = true;
+      this.clearSeatLeaseTimer();
+      this.heartbeatProtocol = message.heartbeatProtocol === "auto-response-v3" ? "auto-response-v3" : "legacy-json";
+      this.startHeartbeat(this.socketGeneration, this.heartbeatProtocol);
       this.slotId = message.slotId ?? message.peerId ?? this.slotId;
       this.peerSessionId = message.peerSessionId ?? this.peerSessionId;
       this.offererSlotId = message.offererSlotId ?? this.offererSlotId;
@@ -892,6 +946,13 @@ export class NativeWebRTCSession {
       this.initiator = message.offererSlotId ? message.offererSlotId === this.slotId : message.isInitiator;
       const hadRemoteParticipant = this.remoteParticipantJoined;
       this.remoteParticipantJoined = message.peerCount > 1;
+      this.setLifecyclePhase(
+        this.connectedNotified && this.openDataChannelCount() === DATA_CHANNEL_COUNT
+          ? "P2P_ACTIVE"
+          : this.remoteParticipantJoined
+            ? "NEGOTIATING"
+            : "WAITING",
+      );
       if (!this.remoteParticipantJoined) {
         this.remoteSlotId = null;
         this.remotePeerSessionId = null;
@@ -902,7 +963,7 @@ export class NativeWebRTCSession {
       if (this.socketMode === "restart-peer" && oldEpoch !== 0 && this.epoch !== oldEpoch) this.resetPeerForNegotiation();
       this.reconnectAttempt = 0;
       this.setStep("websocket", { state: "active", detail: "Signaling socket connected" });
-      this.onStatus({ detail: "Signaling socket connected", state: "connected" });
+      this.reportStatus({ detail: "Signaling socket connected", state: "connected" });
       if (!this.initiator && !this.peer) this.setStep("p2p", { state: "pending", detail: "Waiting for connection offer" });
       // A full page refresh can resume the signaling lease without retaining
       // the old RTCPeerConnection. Ask the room to rotate the peer session so
@@ -926,10 +987,7 @@ export class NativeWebRTCSession {
       return;
     }
     if (message.type === "pong") {
-      if (this.heartbeatStartedAt === null) return;
-      const latency = Math.round(performance.now() - this.heartbeatStartedAt);
-      this.heartbeatStartedAt = null; this.heartbeatMisses = 0;
-      this.setStep("websocket", { state: "active", detail: "Signaling socket connected", latency });
+      this.handleSignalingHeartbeatResponse();
       return;
     }
     if (message.type === "left") { if (this.leaving) this.finishClose(); return; }
@@ -937,6 +995,7 @@ export class NativeWebRTCSession {
       if (!this.updateRemoteMetadata(message)) return;
       this.remoteParticipantJoined = true;
       this.remoteSignalingDisconnected = false;
+      if (!this.connectedNotified) this.setLifecyclePhase("NEGOTIATING");
       if (message.type === "negotiate") this.resetPeerForNegotiation();
       if (!this.readyForPeerConnection) this.setStep("p2p", { state: "checking", detail: "Peer joined, preparing P2P connection" });
       // `peer-ready` is an admission hint. The worker follows it with a
@@ -949,14 +1008,15 @@ export class NativeWebRTCSession {
       if (!this.updateRemoteMetadata(message as unknown as { epoch?: number; peerId?: string; peerSessionId?: string; slotId?: string; offererSlotId?: string })) return;
       if (message.type === "peer-disconnected") {
         this.remoteSignalingDisconnected = true;
+        if (this.lifecyclePhase !== "P2P_ACTIVE") this.setLifecyclePhase("RECOVERING");
         // Keep the P2P transport alive while the remote signaling lease is
         // within its grace period; the room will emit peer-left on expiry.
-        this.onStatus({ detail: "Waiting for the other participant to reconnect", state: "reconnecting" });
+        this.reportStatus({ detail: "Waiting for the other participant to reconnect", state: "reconnecting" });
       } else {
         this.remoteParticipantJoined = true;
         this.remoteSignalingDisconnected = false;
         this.peerRestarting = false;
-        this.onStatus({ detail: "Signaling socket connected", state: "connected" });
+        this.reportStatus({ detail: "Signaling socket connected", state: "connected" });
         const peerNeedsReset = !this.peer
           || this.peer.connectionState !== "connected"
           || this.openDataChannelCount() !== DATA_CHANNEL_COUNT;
@@ -970,8 +1030,11 @@ export class NativeWebRTCSession {
     }
     if (message.type === "replaced") {
       this.closed = true;
+      this.hasAdmittedSeat = false;
+      this.clearSeatLeaseTimer();
+      this.setLifecyclePhase("CLOSED");
       this.finishClose(true);
-      this.onStatus({ detail: "Signaling connection replaced", state: "closed" });
+      this.reportStatus({ detail: "Signaling connection replaced", state: "closed" });
       return;
     }
     if (message.type === "signal") {
@@ -992,6 +1055,7 @@ export class NativeWebRTCSession {
       this.remoteSignalingDisconnected = false;
       this.stopDataChannelLatencyProbe(); this.closeDataChannels(); this.mediaTransport.detachPeer();
       this.peer?.close(); this.peer = null; this.peerRestarting = false; this.connectedNotified = false;
+      this.setLifecyclePhase("WAITING");
       this.setStep("p2p", { state: "pending", detail: "Waiting for the other participant to join the room" });
       this.setStep("dataChannel", { channels: 0, state: "pending", detail: "Waiting for data channel", transferred: this.dataTransfer() });
       this.onPeerLeft(); return;
@@ -1000,10 +1064,14 @@ export class NativeWebRTCSession {
       if (message.code === "room-full") { this.clearReconnectTimer(); this.onRoomFull(); return; }
       if (message.code === "room-reserved") {
         this.setStep("websocket", { state: "checking", detail: "Room temporarily reserved; retrying automatically" });
-        this.onStatus({ detail: "Room temporarily reserved; retrying automatically", retryAfterMs: message.retryAfterMs, state: "reserved" });
+        this.reportStatus({ detail: "Room temporarily reserved; retrying automatically", retryAfterMs: message.retryAfterMs, state: "reserved" });
         this.scheduleReservedRetry(message.retryAfterMs); return;
       }
       if (message.code === "resume-invalid") {
+        const lostSeat = this.hasAdmittedSeat || this.connectedNotified || this.peer !== null;
+        this.hasAdmittedSeat = false;
+        this.clearSeatLeaseTimer();
+        if (lostSeat) this.resetTransportAfterLostSeat();
         this.resumeToken = null; v2WriteResumeToken(this.roomId, null); this.scheduleSocketReconnect("new", true); return;
       }
       this.fail(message.message);
@@ -1072,6 +1140,7 @@ export class NativeWebRTCSession {
   private async performCreateOffer(): Promise<void> {
     let peer: RTCPeerConnection | null = null;
     try {
+      this.setLifecyclePhase("NEGOTIATING");
       peer = this.createPeerConnection();
       const offerEpoch = this.epoch;
       this.mediaTransport.prepareOffer(peer);
@@ -1088,6 +1157,7 @@ export class NativeWebRTCSession {
   }
 
   private createPeerConnection(): RTCPeerConnection {
+    if (this.remoteParticipantJoined) this.setLifecyclePhase("NEGOTIATING");
     const peer = new RTCPeerConnection({ iceServers: this.selectedServers });
     const generation = ++this.peerGeneration;
     this.peer = peer;
@@ -1170,8 +1240,9 @@ export class NativeWebRTCSession {
       this.updateDataChannelProgress(); if (name === "control") this.startDataChannelLatencyProbe();
       if (name === "collaboration") this.notifyCollaborationStatus(true);
       if (this.openDataChannelCount() === DATA_CHANNEL_COUNT && !this.connectedNotified) {
-        this.connectedNotified = true; this.peerRestarting = false; this.onStatus({ detail: "Peer-to-peer connection established", state: "connected" }); this.onConnected(this);
+        this.connectedNotified = true; this.peerRestarting = false; this.reportStatus({ detail: "Peer-to-peer connection established", state: "connected" }); this.onConnected(this);
       }
+      if (this.openDataChannelCount() === DATA_CHANNEL_COUNT) this.setLifecyclePhase("P2P_ACTIVE");
       if (this.peer) void this.detectConnectionRoute(this.peer);
     };
     channel.onmessage = (event) => {
@@ -1200,6 +1271,7 @@ export class NativeWebRTCSession {
   private resetPeerForNegotiation(): void {
     this.connectedNotified = false;
     this.peerRestarting = false;
+    this.setLifecyclePhase(this.remoteParticipantJoined ? "NEGOTIATING" : "WAITING");
     this.stopDataChannelLatencyProbe();
     this.closeDataChannels();
     this.mediaTransport.detachPeer();
@@ -1214,12 +1286,13 @@ export class NativeWebRTCSession {
   private requestPeerRestart(): void {
     if (this.closed || this.suspended || this.peerRestarting || !this.remoteParticipantJoined) return;
     const waitForRemote = this.remoteSignalingDisconnected;
+    this.setLifecyclePhase("RECOVERING");
     this.peerRestarting = !waitForRemote;
     this.connectedNotified = false; this.stopDataChannelLatencyProbe(); this.closeDataChannels();
     this.mediaTransport.detachPeer(); const peer = this.peer; this.peer = null; peer?.close();
     this.setStep("p2p", { state: "checking", detail: "Reconnecting peer-to-peer connection" });
     this.setStep("dataChannel", { channels: 0, state: "checking", detail: "Reconnecting data channels", transferred: this.dataTransfer() });
-    this.onStatus({ detail: waitForRemote ? "Waiting for the other participant to reconnect" : "Reconnecting peer-to-peer connection", state: "reconnecting" });
+    this.reportStatus({ detail: waitForRemote ? "Waiting for the other participant to reconnect" : "Reconnecting peer-to-peer connection", state: "reconnecting" });
     if (!waitForRemote) this.openSocket("restart-peer");
   }
 
@@ -1239,18 +1312,35 @@ export class NativeWebRTCSession {
     this.sendSocket({ type: "signal", epoch: this.epoch, fromSlotId: this.slotId ?? undefined, peerSessionId: this.peerSessionId ?? undefined, payload });
   }
 
-  private startHeartbeat(generation: number): void {
+  private startHeartbeat(generation: number, protocol: SignalingHeartbeatProtocol): void {
     this.stopHeartbeat();
     const sendHeartbeat = () => {
       if (this.closed || this.suspended || generation !== this.socketGeneration || this.socket?.readyState !== WebSocket.OPEN) return;
       if (this.heartbeatStartedAt !== null) {
         this.heartbeatMisses += 1;
-        if (this.heartbeatMisses >= V2_MAX_HEARTBEAT_MISSES) { this.socket?.close(4_001, "Signaling heartbeat timeout"); return; }
+        if (this.heartbeatMisses >= MAX_SIGNALING_HEARTBEAT_MISSES) { this.socket?.close(4_001, "Signaling heartbeat timeout"); return; }
       }
-      this.heartbeatStartedAt = performance.now(); this.sendSocket({ type: "ping" });
+      this.heartbeatStartedAt = performance.now();
+      if (protocol === "auto-response-v3") {
+        try {
+          this.socket.send(SIGNALING_HEARTBEAT_REQUEST);
+        } catch {
+          this.socket.close(4_001, "Signaling heartbeat send failed");
+        }
+      } else {
+        this.sendSocket({ type: "ping" });
+      }
     };
     sendHeartbeat();
-    this.heartbeatTimer = window.setInterval(sendHeartbeat, V2_HEARTBEAT_INTERVAL);
+    this.heartbeatTimer = window.setInterval(sendHeartbeat, SIGNALING_HEARTBEAT_INTERVAL_MS);
+  }
+
+  private handleSignalingHeartbeatResponse(): void {
+    if (this.heartbeatStartedAt === null) return;
+    const latency = Math.round(performance.now() - this.heartbeatStartedAt);
+    this.heartbeatStartedAt = null;
+    this.heartbeatMisses = 0;
+    this.setStep("websocket", { state: "active", detail: "Signaling socket connected", latency });
   }
 
   private stopHeartbeat(): void {
@@ -1264,7 +1354,7 @@ export class NativeWebRTCSession {
     const base = immediate ? 0 : V2_RECONNECT_DELAYS[Math.min(this.reconnectAttempt++, V2_RECONNECT_DELAYS.length - 1)];
     const jitter = base ? Math.round(base * (Math.random() * 0.2 - 0.1)) : 0;
     const delay = Math.max(0, base + jitter);
-    this.onStatus({ detail: "Reconnecting signaling socket", retryAfterMs: delay, state: "reconnecting" });
+    this.reportStatus({ detail: "Reconnecting signaling socket", retryAfterMs: delay, state: "reconnecting" });
     this.reconnectTimer = window.setTimeout(() => { this.reconnectTimer = undefined; this.openSocket(this.reconnectMode); }, delay);
   }
 
@@ -1277,6 +1367,45 @@ export class NativeWebRTCSession {
 
   private clearReconnectTimer(): void {
     if (this.reconnectTimer !== undefined) { window.clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined; }
+  }
+
+  private scheduleSeatLeaseExpiry(): void {
+    if (!this.hasAdmittedSeat || this.closed || this.suspended) return;
+    if (this.seatLeaseTimer !== undefined) return;
+    this.seatLeaseTimer = window.setTimeout(() => {
+      this.seatLeaseTimer = undefined;
+      if (!this.hasAdmittedSeat || this.closed || this.suspended) return;
+      this.hasAdmittedSeat = false;
+      this.resetTransportAfterLostSeat();
+      this.reportStatus({ detail: "Signaling seat expired; rebuilding the room connection", state: "reconnecting" });
+    }, ROOM_DISCONNECTED_LEASE_MS + SEAT_LEASE_LOCAL_GRACE_MS);
+  }
+
+  private clearSeatLeaseTimer(): void {
+    if (this.seatLeaseTimer !== undefined) {
+      window.clearTimeout(this.seatLeaseTimer);
+      this.seatLeaseTimer = undefined;
+    }
+  }
+
+  private resetTransportAfterLostSeat(): void {
+    this.stopDataChannelLatencyProbe();
+    this.closeDataChannels();
+    this.mediaTransport.detachPeer();
+    this.peer?.close();
+    this.peer = null;
+    this.pendingSignals = [];
+    this.remoteParticipantJoined = false;
+    this.remoteSignalingDisconnected = false;
+    this.remoteSlotId = null;
+    this.rememberedRemoteSlotId = null;
+    this.remotePeerSessionId = null;
+    this.peerRestarting = false;
+    this.connectedNotified = false;
+    this.setLifecyclePhase("RECOVERING");
+    this.setStep("p2p", { state: "checking", detail: "Rebuilding the room connection" });
+    this.setStep("dataChannel", { channels: 0, state: "checking", detail: "Rebuilding data channels", transferred: this.dataTransfer() });
+    this.onPeerLeft();
   }
 
   private sendSocket(message: object): boolean {

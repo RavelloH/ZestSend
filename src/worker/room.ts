@@ -1,4 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  ACTIVE_SIGNALING_TIMEOUT_MS,
+  ROOM_DISCONNECTED_LEASE_MS,
+  SIGNALING_HEARTBEAT_CAPABILITY,
+  SIGNALING_HEARTBEAT_REQUEST,
+  SIGNALING_HEARTBEAT_RESPONSE,
+  type SignalingHeartbeatProtocol,
+} from "../shared/signaling-protocol";
 
 type SignalPayload = {
   candidate?: {
@@ -15,17 +23,12 @@ type SignalPayload = {
 
 type HelloMode = "new" | "resume-signaling" | "restart-peer";
 
-type HelloMessage = {
-  type: "hello";
-  mode?: HelloMode;
-  resumeToken?: string;
-  token?: string;
-};
-
 type SocketAttachment = {
   phase: "pending" | "active" | "closing";
   connectionId: string;
   connectedAt: number;
+  heartbeatProtocol?: SignalingHeartbeatProtocol;
+  lastSeenAt?: number;
   slotId?: string;
   peerSessionId?: string;
 };
@@ -37,7 +40,7 @@ type SlotState = {
   connectionId: string | null;
   disconnectedAt: number | null;
   leaseExpiresAt: number | null;
-  lastSeenAt: number;
+  lastSeenAt?: number;
 };
 
 type RoomState = {
@@ -58,6 +61,7 @@ type ParsedMessage = {
   resumeToken?: unknown;
   token?: unknown;
   payload?: unknown;
+  capabilities?: unknown;
   epoch?: unknown;
   peerSessionId?: unknown;
 };
@@ -66,9 +70,6 @@ const MAX_PEERS = 2;
 const MAX_PENDING_SOCKETS = 8;
 const MAX_MESSAGE_BYTES = 128 * 1024;
 const HANDSHAKE_TIMEOUT_MS = 5_000;
-const DISCONNECTED_LEASE_MS = 30_000;
-const ACTIVE_SWEEP_INTERVAL_MS = 30_000;
-const ACTIVE_HEARTBEAT_TIMEOUT_MS = 90_000;
 const STORAGE_KEY = "room-state-v2";
 const textEncoder = new TextEncoder();
 
@@ -78,6 +79,10 @@ function emptyState(): RoomState {
 
 function isHelloMode(value: unknown): value is HelloMode {
   return value === "new" || value === "resume-signaling" || value === "restart-peer";
+}
+
+function supportsAutoResponseHeartbeat(value: unknown): boolean {
+  return Array.isArray(value) && value.includes(SIGNALING_HEARTBEAT_CAPABILITY);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -114,11 +119,10 @@ function validSlot(value: unknown): value is SlotState {
 
 function normalizeState(value: unknown): RoomState {
   if (!isRecord(value) || value.version !== 2 || !Array.isArray(value.slots)) return emptyState();
-  const now = Date.now();
-  const slots = value.slots.filter(validSlot).slice(0, MAX_PEERS).map((slot) => ({
-    ...slot,
-    lastSeenAt: typeof slot.lastSeenAt === "number" && Number.isFinite(slot.lastSeenAt) ? slot.lastSeenAt : now,
-  }));
+  const slots = value.slots.filter(validSlot).slice(0, MAX_PEERS).map((slot) => {
+    const { lastSeenAt: _lastSeenAt, ...normalizedSlot } = slot;
+    return normalizedSlot;
+  });
   const offererSlotId = typeof value.offererSlotId === "string" && slots.some((slot) => slot.slotId === value.offererSlotId)
     ? value.offererSlotId
     : slots[0]?.slotId ?? null;
@@ -141,6 +145,8 @@ function attachmentFor(socket: WebSocket): SocketAttachment | null {
         phase: "active",
         connectionId: value.peerId,
         connectedAt: 0,
+        lastSeenAt: Date.now(),
+        heartbeatProtocol: "legacy-json",
         slotId: value.peerId,
         peerSessionId: value.peerId,
       };
@@ -173,6 +179,13 @@ function signalPayload(value: unknown): value is SignalPayload {
 
 /** A room owns the two logical WebRTC seats and their short-lived leases. */
 export class Room extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.ctx.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair(SIGNALING_HEARTBEAT_REQUEST, SIGNALING_HEARTBEAT_RESPONSE),
+    );
+  }
+
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Expected a WebSocket upgrade.", { status: 426 });
@@ -194,7 +207,7 @@ export class Room extends DurableObject<Env> {
       server.serializeAttachment({ phase: "pending", connectionId, connectedAt } satisfies SocketAttachment);
       this.ctx.acceptWebSocket(server);
       accepted = true;
-      await this.scheduleAlarm(connectedAt + HANDSHAKE_TIMEOUT_MS);
+      await this.scheduleAlarm();
     });
 
     if (!accepted) {
@@ -224,6 +237,14 @@ export class Room extends DurableObject<Env> {
       return;
     }
 
+    const initialAttachment = attachmentFor(socket);
+    if (parsed.type === "ping" && initialAttachment?.phase === "active") {
+      this.touchActiveSocket(socket, initialAttachment);
+      this.send(socket, { type: "pong" });
+      return;
+    }
+    if (initialAttachment?.phase === "active") this.touchActiveSocket(socket, initialAttachment);
+
     await this.ctx.blockConcurrencyWhile(async () => {
       const attachment = attachmentFor(socket);
       if (!attachment) {
@@ -234,22 +255,24 @@ export class Room extends DurableObject<Env> {
       if (attachment.phase === "pending") {
         // Older clients send a JSON ping immediately after opening the socket.
         if (parsed.type === "ping") {
-          const admitted = await this.admit(socket, "new", null, attachment);
+          const admitted = await this.admit(socket, "new", null, attachment, "legacy-json");
           if (admitted) this.send(socket, { type: "pong" });
           return;
         }
         if (parsed.type === "hello") {
           const mode = isHelloMode(parsed.mode) ? parsed.mode : "new";
           const resumeToken = asString(parsed.resumeToken ?? parsed.token, 512);
-          await this.admit(socket, mode, resumeToken, attachment);
+          const heartbeatProtocol = supportsAutoResponseHeartbeat(parsed.capabilities)
+            ? "auto-response-v3"
+            : "legacy-json";
+          await this.admit(socket, mode, resumeToken, attachment, heartbeatProtocol);
           return;
         }
         // Preserve clients that raced their first signal ahead of the legacy ping.
         if (parsed.type === "signal") {
-          const admitted = await this.admit(socket, "new", null, attachment);
+          const admitted = await this.admit(socket, "new", null, attachment, "legacy-json");
           if (admitted) {
-            const current = await this.currentSlot(socket, attachmentFor(socket) ?? attachment);
-            if (current) await this.forwardSignal(socket, parsed, current.slot);
+            await this.forwardSignal(socket, parsed, admitted.slot, admitted.state);
           }
           return;
         }
@@ -257,17 +280,16 @@ export class Room extends DurableObject<Env> {
         return;
       }
 
-      const current = await this.currentSlot(socket, attachment);
-      if (!current) return;
-      current.slot.lastSeenAt = Date.now();
-      await this.saveState(current.state, true);
-
       if (parsed.type === "ping") {
+        this.touchActiveSocket(socket, attachment);
         this.send(socket, { type: "pong" });
         return;
       }
+
+      const current = await this.currentSlot(socket, attachment);
+      if (!current) return;
       if (parsed.type === "leave") {
-        await this.leave(socket, attachment, current.slot);
+        await this.leave(socket, attachment, current.slot, current.state);
         return;
       }
       if (parsed.type === "hello") {
@@ -275,7 +297,7 @@ export class Room extends DurableObject<Env> {
         return;
       }
       if (parsed.type === "signal") {
-        await this.forwardSignal(socket, parsed, current.slot);
+        await this.forwardSignal(socket, parsed, current.slot, current.state);
       }
     });
   }
@@ -285,7 +307,7 @@ export class Room extends DurableObject<Env> {
       const attachment = attachmentFor(socket);
       if (!attachment || attachment.phase !== "active" || !attachment.slotId) return;
 
-      const { state, changed } = await this.loadStateAndNotify();
+      const { state } = await this.loadStateAndNotify();
       const slot = state.slots.find((candidate) => candidate.slotId === attachment.slotId);
       // A delayed close from a replaced socket must not evict the new connection.
       if (!slot || slot.connectionId !== attachment.connectionId) return;
@@ -296,7 +318,7 @@ export class Room extends DurableObject<Env> {
       this.markClosing(socket);
       slot.connectionId = null;
       slot.disconnectedAt = now;
-      slot.leaseExpiresAt = now + DISCONNECTED_LEASE_MS;
+      slot.leaseExpiresAt = now + ROOM_DISCONNECTED_LEASE_MS;
       state.epoch += 1;
       await this.saveState(state, true);
       this.broadcastToActive(state, {
@@ -305,9 +327,9 @@ export class Room extends DurableObject<Env> {
         slotId: slot.slotId,
         peerId: slot.slotId,
         peerSessionId: slot.peerSessionId,
-        retryAfterMs: DISCONNECTED_LEASE_MS,
+        retryAfterMs: ROOM_DISCONNECTED_LEASE_MS,
       });
-      await this.scheduleAlarm();
+      await this.scheduleAlarm(state);
     });
   }
 
@@ -326,6 +348,7 @@ export class Room extends DurableObject<Env> {
       for (const socket of this.ctx.getWebSockets()) {
         const attachment = attachmentFor(socket);
         if (attachment?.phase === "pending" && attachment.connectedAt + HANDSHAKE_TIMEOUT_MS <= now) {
+          this.markClosing(socket);
           pendingToClose.push(socket);
         }
       }
@@ -333,30 +356,10 @@ export class Room extends DurableObject<Env> {
         this.sendErrorAndClose(socket, "hello-timeout", "Hello handshake timed out.", 4_017);
       }
 
-      const { state, changed } = await this.loadStateAndNotify();
-      const inactive = this.removeInactiveConnections(state, now);
-      for (const inactiveConnection of inactive) {
-        const { slot, connectionId } = inactiveConnection;
-        const staleSocket = this.socketForConnection(slot.slotId, connectionId);
-        if (staleSocket) {
-          this.markClosing(staleSocket);
-          try {
-            staleSocket.close(4_021, "Heartbeat timed out");
-          } catch {
-            // The runtime may already have closed the socket.
-          }
-        }
-        this.broadcastToActive(state, {
-          type: "peer-disconnected",
-          epoch: state.epoch,
-          slotId: slot.slotId,
-          peerId: slot.slotId,
-          peerSessionId: slot.peerSessionId,
-          retryAfterMs: DISCONNECTED_LEASE_MS,
-        });
-      }
+      const { state, disconnected } = await this.loadState();
+      if (disconnected.length > 0) this.broadcastReconciledDisconnections(state, disconnected);
       const expired = this.removeExpiredLeases(state, now);
-      if (expired.length > 0 || inactive.length > 0) {
+      if (expired.length > 0) {
         await this.saveState(state, true);
         for (const slot of expired) {
           this.broadcastToActive(state, {
@@ -367,10 +370,8 @@ export class Room extends DurableObject<Env> {
             peerSessionId: slot.peerSessionId,
           });
         }
-      } else if (changed) {
-        await this.saveState(state, true);
       }
-      await this.scheduleAlarm();
+      await this.scheduleAlarm(state);
     });
   }
 
@@ -379,7 +380,8 @@ export class Room extends DurableObject<Env> {
     requestedMode: HelloMode,
     resumeToken: string | null,
     pendingAttachment: SocketAttachment,
-  ): Promise<boolean> {
+    heartbeatProtocol: SignalingHeartbeatProtocol,
+  ): Promise<{ state: RoomState; slot: SlotState } | null> {
     let resumeTokenForClient: string | null = null;
     const now = Date.now();
     const loaded = await this.loadStateAndNotify();
@@ -396,10 +398,10 @@ export class Room extends DurableObject<Env> {
           peerSessionId: slot.peerSessionId,
         });
       }
-      await this.scheduleAlarm();
+      await this.scheduleAlarm(state);
     }
 
-    let mode = requestedMode;
+    const mode = requestedMode;
     let slot: SlotState | undefined;
     let replacedSocket: WebSocket | undefined;
     let resumed = false;
@@ -407,13 +409,13 @@ export class Room extends DurableObject<Env> {
     if (mode !== "new") {
       if (!resumeToken) {
         this.sendErrorAndClose(socket, "resume-invalid", "A resume token is required.", 4_018);
-        return false;
+        return null;
       }
       const hash = await tokenHash(resumeToken);
       slot = state.slots.find((candidate) => candidate.tokenHash !== "" && candidate.tokenHash === hash);
       if (!slot || (slot.leaseExpiresAt !== null && slot.leaseExpiresAt <= now)) {
         this.sendErrorAndClose(socket, "resume-invalid", "The resume token is invalid or expired.", 4_018);
-        return false;
+        return null;
       }
       resumed = true;
       if (slot.connectionId) {
@@ -433,7 +435,7 @@ export class Room extends DurableObject<Env> {
         } else {
           this.sendErrorAndClose(socket, "room-full", "Room is full.", 4_003);
         }
-        return false;
+        return null;
       }
       const token = randomToken();
       slot = {
@@ -443,7 +445,6 @@ export class Room extends DurableObject<Env> {
         connectionId: pendingAttachment.connectionId,
         disconnectedAt: null,
         leaseExpiresAt: null,
-        lastSeenAt: now,
       };
       state.slots.push(slot);
       if (!state.offererSlotId) state.offererSlotId = slot.slotId;
@@ -451,7 +452,7 @@ export class Room extends DurableObject<Env> {
       resumeTokenForClient = token;
     }
 
-    if (!slot) return false;
+    if (!slot) return null;
     if (resumed) {
       const token = randomToken();
       slot.tokenHash = await tokenHash(token);
@@ -460,7 +461,6 @@ export class Room extends DurableObject<Env> {
     slot.connectionId = pendingAttachment.connectionId;
     slot.disconnectedAt = null;
     slot.leaseExpiresAt = null;
-    slot.lastSeenAt = now;
     if (!state.offererSlotId || !state.slots.some((candidate) => candidate.slotId === state.offererSlotId)) {
       state.offererSlotId = state.slots[0]?.slotId ?? null;
     }
@@ -470,12 +470,14 @@ export class Room extends DurableObject<Env> {
       phase: "active",
       connectionId: pendingAttachment.connectionId,
       connectedAt: pendingAttachment.connectedAt,
+      heartbeatProtocol,
+      lastSeenAt: now,
       slotId: slot.slotId,
       peerSessionId: slot.peerSessionId,
     };
     socket.serializeAttachment(attachment);
     await this.saveState(state, true);
-    await this.scheduleAlarm();
+    await this.scheduleAlarm(state);
 
     if (replacedSocket && replacedSocket !== socket) {
       this.markClosing(replacedSocket);
@@ -498,6 +500,7 @@ export class Room extends DurableObject<Env> {
       isInitiator: state.offererSlotId === slot.slotId,
       peerCount: activeSlots.length,
       resumed,
+      ...(heartbeatProtocol === "auto-response-v3" ? { heartbeatProtocol } : {}),
     });
 
     if (resumed && mode === "resume-signaling") {
@@ -519,20 +522,19 @@ export class Room extends DurableObject<Env> {
       }, socket);
       this.sendNegotiation(state, activeSlots, slot.slotId);
     }
-    return true;
+    return { state, slot };
   }
 
-  private async forwardSignal(socket: WebSocket, parsed: ParsedMessage, sender?: SlotState): Promise<void> {
+  private async forwardSignal(socket: WebSocket, parsed: ParsedMessage, sender: SlotState, state: RoomState): Promise<void> {
     const attachment = attachmentFor(socket);
-    if (!attachment?.slotId || !sender || sender.connectionId !== attachment.connectionId) return;
+    if (!attachment?.slotId || sender.connectionId !== attachment.connectionId) return;
     if (!signalPayload(parsed.payload)) {
       this.send(socket, { type: "error", code: "invalid-signal", message: "Invalid signaling payload." });
       return;
     }
-    if (typeof parsed.epoch === "number" && parsed.epoch !== (await this.loadStateAndNotify()).state.epoch) return;
+    if (typeof parsed.epoch === "number" && parsed.epoch !== state.epoch) return;
     if (parsed.peerSessionId !== undefined && parsed.peerSessionId !== sender.peerSessionId) return;
 
-    const state = (await this.loadStateAndNotify()).state;
     this.broadcastToActive(state, {
       type: "signal",
       from: sender.slotId,
@@ -552,9 +554,7 @@ export class Room extends DurableObject<Env> {
     return slot ? { state, slot } : null;
   }
 
-  private async leave(socket: WebSocket, attachment: SocketAttachment, slot: SlotState): Promise<void> {
-    const loaded = await this.loadStateAndNotify();
-    const state = loaded.state;
+  private async leave(socket: WebSocket, attachment: SocketAttachment, slot: SlotState, state: RoomState): Promise<void> {
     const current = state.slots.find((candidate) => candidate.slotId === slot.slotId && candidate.connectionId === attachment.connectionId);
     if (!current) return;
     state.slots = state.slots.filter((candidate) => candidate.slotId !== slot.slotId);
@@ -570,7 +570,7 @@ export class Room extends DurableObject<Env> {
       peerId: slot.slotId,
       peerSessionId: slot.peerSessionId,
     }, socket);
-    await this.scheduleAlarm();
+    await this.scheduleAlarm(state);
     try {
       socket.close(1000, "Left room");
     } catch {
@@ -578,19 +578,19 @@ export class Room extends DurableObject<Env> {
     }
   }
 
-  private async loadStateAndNotify(): Promise<{ state: RoomState; changed: boolean }> {
+  private async loadStateAndNotify(): Promise<{ state: RoomState }> {
     const loaded = await this.loadState();
     if (loaded.disconnected.length > 0) {
       this.broadcastReconciledDisconnections(loaded.state, loaded.disconnected);
-      await this.scheduleAlarm();
+      await this.scheduleAlarm(loaded.state);
     }
-    return loaded;
+    return { state: loaded.state };
   }
 
   private async loadState(): Promise<{ state: RoomState; changed: boolean; disconnected: InactiveConnection[] }> {
     const stored = await this.ctx.storage.get<unknown>(STORAGE_KEY);
     const state = normalizeState(stored);
-    let changed = stored === undefined || JSON.stringify(stored) !== JSON.stringify(state);
+    let changed = stored !== undefined && JSON.stringify(stored) !== JSON.stringify(state);
     const disconnected: InactiveConnection[] = [];
     const live = new Map<string, SocketAttachment[]>();
     for (const socket of this.ctx.getWebSockets()) {
@@ -614,7 +614,6 @@ export class Room extends DurableObject<Env> {
           connectionId: attachment.connectionId,
           disconnectedAt: null,
           leaseExpiresAt: null,
-          lastSeenAt: Date.now(),
         });
         state.epoch += 1;
         if (!state.offererSlotId) state.offererSlotId = attachment.slotId!;
@@ -632,12 +631,25 @@ export class Room extends DurableObject<Env> {
     }
 
     for (const slot of state.slots) {
-      if (!slot.connectionId || live.has(slot.slotId)) continue;
+      if (!slot.connectionId) continue;
+      const liveSocket = this.socketForConnection(slot.slotId, slot.connectionId);
+      const attachment = liveSocket ? attachmentFor(liveSocket) : null;
+      const lastSeenAt = liveSocket && attachment ? this.lastSignalingActivityAt(liveSocket, attachment) : null;
+      if (liveSocket && socketIsLive(liveSocket) && lastSeenAt !== null && Date.now() - lastSeenAt <= ACTIVE_SIGNALING_TIMEOUT_MS) continue;
+
       const now = Date.now();
       disconnected.push({ slot: { ...slot }, connectionId: slot.connectionId });
+      if (liveSocket) {
+        this.markClosing(liveSocket);
+        try {
+          liveSocket.close(4_021, "Signaling heartbeat timed out");
+        } catch {
+          // The runtime may already have closed the socket.
+        }
+      }
       slot.connectionId = null;
       slot.disconnectedAt ??= now;
-      slot.leaseExpiresAt ??= now + DISCONNECTED_LEASE_MS;
+      slot.leaseExpiresAt ??= now + ROOM_DISCONNECTED_LEASE_MS;
       state.epoch += 1;
       changed = true;
     }
@@ -649,7 +661,10 @@ export class Room extends DurableObject<Env> {
       state.offererSlotId = state.slots[0]?.slotId ?? null;
       changed = true;
     }
-    if (changed) await this.ctx.storage.put(STORAGE_KEY, state);
+    if (changed) {
+      if (state.slots.length === 0) await this.ctx.storage.delete(STORAGE_KEY);
+      else await this.ctx.storage.put(STORAGE_KEY, state);
+    }
     return { state, changed, disconnected };
   }
 
@@ -671,28 +686,12 @@ export class Room extends DurableObject<Env> {
     return expired;
   }
 
-  private removeInactiveConnections(state: RoomState, now: number): InactiveConnection[] {
-    const inactive = state.slots.filter((slot) => {
-      return slot.connectionId !== null && now - slot.lastSeenAt > ACTIVE_HEARTBEAT_TIMEOUT_MS;
-    }).map((slot) => ({ slot: { ...slot }, connectionId: slot.connectionId as string }));
-    if (inactive.length === 0) return [];
-    const inactiveIds = new Set(inactive.map(({ slot }) => slot.slotId));
-    for (const slot of state.slots) {
-      if (!inactiveIds.has(slot.slotId)) continue;
-      slot.connectionId = null;
-      slot.disconnectedAt = now;
-      slot.leaseExpiresAt = now + DISCONNECTED_LEASE_MS;
-    }
-    state.epoch += 1;
-    return inactive;
-  }
-
   private retryAfterMs(state: RoomState, now: number): number {
     const expiry = state.slots
       .filter((slot) => slot.connectionId === null && slot.leaseExpiresAt !== null)
       .map((slot) => slot.leaseExpiresAt as number)
       .sort((left, right) => left - right)[0];
-    return expiry ? Math.max(250, Math.min(DISCONNECTED_LEASE_MS, expiry - now)) : DISCONNECTED_LEASE_MS;
+    return expiry ? Math.max(250, Math.min(ROOM_DISCONNECTED_LEASE_MS, expiry - now)) : ROOM_DISCONNECTED_LEASE_MS;
   }
 
   private socketForSlot(slot: SlotState): WebSocket | undefined {
@@ -717,25 +716,54 @@ export class Room extends DurableObject<Env> {
     }
   }
 
-  private async scheduleAlarm(explicitTime?: number): Promise<void> {
+  private touchActiveSocket(socket: WebSocket, attachment: SocketAttachment): void {
+    if (attachment.phase !== "active") return;
+    try {
+      socket.serializeAttachment({ ...attachment, lastSeenAt: Date.now() } satisfies SocketAttachment);
+    } catch {
+      // The runtime may already have detached a closing socket.
+    }
+  }
+
+  private lastSignalingActivityAt(socket: WebSocket, attachment: SocketAttachment): number | null {
+    try {
+      const automaticResponse = this.ctx.getWebSocketAutoResponseTimestamp(socket);
+      if (automaticResponse) return automaticResponse.getTime();
+    } catch {
+      // Older runtime contexts may not expose timestamps for every socket.
+    }
+    const fallback = attachment.lastSeenAt ?? attachment.connectedAt;
+    return Number.isFinite(fallback) && fallback > 0 ? fallback : null;
+  }
+
+  private async scheduleAlarm(state?: RoomState): Promise<void> {
     const now = Date.now();
-    let next = explicitTime ?? Number.POSITIVE_INFINITY;
+    let next = Number.POSITIVE_INFINITY;
     for (const socket of this.ctx.getWebSockets()) {
       const attachment = attachmentFor(socket);
-      if (attachment?.phase === "pending") next = Math.min(next, attachment.connectedAt + HANDSHAKE_TIMEOUT_MS);
+      if (attachment?.phase === "pending" && socketIsLive(socket)) {
+        next = Math.min(next, Math.max(now + 50, attachment.connectedAt + HANDSHAKE_TIMEOUT_MS));
+      }
     }
-    const state = normalizeState(await this.ctx.storage.get<unknown>(STORAGE_KEY));
-    if (state.slots.some((slot) => slot.connectionId !== null)) {
-      next = Math.min(next, now + ACTIVE_SWEEP_INTERVAL_MS);
+    if (state) {
+      const hasActiveParticipant = state.slots.some((slot) => slot.connectionId !== null);
+      if (hasActiveParticipant) {
+        for (const slot of state.slots) {
+          if (slot.connectionId === null && slot.leaseExpiresAt !== null) next = Math.min(next, slot.leaseExpiresAt);
+        }
+      }
     }
-    for (const slot of state.slots) {
-      if (slot.connectionId === null && slot.leaseExpiresAt !== null) next = Math.min(next, slot.leaseExpiresAt);
-    }
+
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (!state && currentAlarm !== null) next = Math.min(next, currentAlarm);
     if (!Number.isFinite(next)) {
-      await this.ctx.storage.deleteAlarm();
+      if (currentAlarm !== null) await this.ctx.storage.deleteAlarm();
       return;
     }
-    await this.ctx.storage.setAlarm(Math.max(now + 50, next));
+    const scheduledAt = Math.max(now + 50, next);
+    if (currentAlarm === scheduledAt) return;
+    if (!state && currentAlarm !== null && currentAlarm < scheduledAt) return;
+    await this.ctx.storage.setAlarm(scheduledAt);
   }
 
   private broadcastToActive(state: RoomState, payload: object, except?: WebSocket): void {
@@ -756,7 +784,7 @@ export class Room extends DurableObject<Env> {
         slotId: slot.slotId,
         peerId: slot.slotId,
         peerSessionId: slot.peerSessionId,
-        retryAfterMs: DISCONNECTED_LEASE_MS,
+        retryAfterMs: ROOM_DISCONNECTED_LEASE_MS,
       });
     }
   }
