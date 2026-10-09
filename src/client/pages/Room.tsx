@@ -2366,6 +2366,7 @@ function RoomWorkspace({
   progress,
   roomId,
   connectionRoute,
+  connectionNotice,
   onSendChatMessage,
   voiceActive,
   videoActive,
@@ -2425,6 +2426,7 @@ function RoomWorkspace({
   progress: ConnectionProgress;
   roomId: string;
   connectionRoute: ConnectionRoute;
+  connectionNotice: string | null;
   onSendChatMessage: (text: string) => boolean;
   voiceActive: boolean;
   videoActive: boolean;
@@ -2572,6 +2574,12 @@ function RoomWorkspace({
               />
             </Clickable>
           </header>
+
+          {connectionNotice ? (
+            <div aria-live="polite" className="mt-3 rounded-xl border border-amber-200/15 bg-amber-100/[0.06] px-4 py-2 text-xs font-medium leading-relaxed tracking-[0.03em] text-amber-100/75" role="status">
+              {connectionNotice}
+            </div>
+          ) : null}
 
           <main className="relative min-h-0 flex-1">
             <AutoTransition
@@ -2811,6 +2819,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
   const navigate = useNavigate();
   const [dialogPhase, setDialogPhase] = useState<"connecting" | "closing-for-full" | "closing-for-leave" | "closing-for-ready" | "closing-for-reconnect" | "full" | "ready">("connecting");
   const [error, setError] = useState<string | null>(null);
+  const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [connectionRoute, setConnectionRoute] = useState<ConnectionRoute>("direct");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [fileTransfers, setFileTransfers] = useState<FileTransferSnapshot[]>([]);
@@ -3410,6 +3419,30 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
       },
       handleSharedPlaybackMessage,
       (status: SessionStatus) => {
+        if (status.p2pState === "connected") {
+          setError(null);
+          if (status.signalingState === "reconnecting" || status.signalingState === "unavailable"
+            || status.seatState === "verification-required" || status.seatState === "expired") {
+            setConnectionNotice(locale === "zh"
+              ? status.seatState === "expired"
+                ? "房间席位已过期；当前端对端连接和传输仍保持可用。"
+                : status.seatState === "verification-required"
+                ? "房间席位正在重新验证；当前端对端连接和传输仍保持可用。"
+                : "信令正在重连；当前端对端连接和传输仍保持可用。"
+              : status.seatState === "expired"
+                ? "The room seat expired; the current peer connection and transfers remain available."
+                : status.seatState === "verification-required"
+                ? "Verifying the room seat; the current peer connection and transfers remain available."
+                : "Signaling is reconnecting; the current peer connection and transfers remain available.");
+          } else {
+            setConnectionNotice(null);
+          }
+          setDialogPhase((current) => current === "closing-for-reconnect" || current === "connecting"
+            ? "closing-for-ready"
+            : current);
+          return;
+        }
+        setConnectionNotice(null);
         if (status.state === "reconnecting" || status.state === "reserved") {
           showReconnectDialog(status.detail);
           return;
@@ -4023,6 +4056,7 @@ export default function Room({ locale, roomId }: { locale: RoomLocale; roomId: s
           progress={progress}
           roomId={roomId}
           connectionRoute={connectionRoute}
+          connectionNotice={connectionNotice}
           voiceActive={microphoneActive || remoteVoiceActive}
           videoActive={cameraActive || screenShareActive || remoteVideoActive}
         />

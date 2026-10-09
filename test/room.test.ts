@@ -204,6 +204,17 @@ describe("Durable Object room protocol", () => {
     expect((await inspectRoom(first.stub)).alarm).not.toBeNull();
   });
 
+  it("clears a legacy periodic alarm after the upgraded room runs it", async () => {
+    const client = await openRoomSocket(crypto.randomUUID());
+    await hello(client.socket, client.inbox);
+    await runInDurableObject(client.stub, (_instance, state) => state.storage.setAlarm(Date.now() + 60_000));
+
+    expect((await inspectRoom(client.stub)).alarm).not.toBeNull();
+    expect(await runDurableObjectAlarm(client.stub)).toBe(true);
+    expect((await inspectRoom(client.stub)).alarm).toBeNull();
+    expect(await runDurableObjectAlarm(client.stub)).toBe(false);
+  });
+
   it("expires a lease once, notifies the waiting participant, and leaves no follow-up alarm", async () => {
     const roomId = crypto.randomUUID();
     const first = await openRoomSocket(roomId);
@@ -225,7 +236,7 @@ describe("Durable Object room protocol", () => {
 
     const peerLeft = first.inbox.nextType("peer-left");
     expect(await runDurableObjectAlarm(first.stub)).toBe(true);
-    expect((await peerLeft).slotId).toBe(secondWelcome.slotId);
+    expect(await peerLeft).toMatchObject({ slotId: secondWelcome.slotId, reason: "lease-expired" });
     const after = await inspectRoom(first.stub);
     expect(after.room?.slots.map((slot) => slot.slotId)).toEqual([expect.any(String)]);
     expect(after.alarm).toBeNull();
@@ -269,6 +280,28 @@ describe("Durable Object room protocol", () => {
     const rejection = staleResume.inbox.nextType("error");
     staleResume.socket.send(JSON.stringify({ type: "hello", mode: "resume-signaling", resumeToken: originalToken }));
     expect((await rejection).code).toBe("resume-invalid");
+  });
+
+  it("allows only one of two simultaneous resumes to claim a seat token", async () => {
+    const roomId = crypto.randomUUID();
+    const original = await openRoomSocket(roomId);
+    const firstWelcome = await hello(original.socket, original.inbox);
+    const token = firstWelcome.resumeToken;
+    if (typeof token !== "string") throw new Error("Welcome did not provide a resume token.");
+
+    const firstResume = await openRoomSocket(roomId);
+    const secondResume = await openRoomSocket(roomId);
+    const firstResult = firstResume.inbox.next((message) => typeof message !== "string" && (message.type === "welcome" || message.type === "error"));
+    const secondResult = secondResume.inbox.next((message) => typeof message !== "string" && (message.type === "welcome" || message.type === "error"));
+    firstResume.socket.send(JSON.stringify({ type: "hello", mode: "resume-signaling", resumeToken: token }));
+    secondResume.socket.send(JSON.stringify({ type: "hello", mode: "resume-signaling", resumeToken: token }));
+
+    const results = await Promise.all([firstResult, secondResult]);
+    expect(results.filter((message) => typeof message !== "string" && message.type === "welcome")).toHaveLength(1);
+    expect(results.filter((message) => typeof message !== "string" && message.type === "error")).toMatchObject([
+      expect.objectContaining({ code: "resume-invalid" }),
+    ]);
+    expect((await inspectRoom(original.stub)).room?.slots).toHaveLength(1);
   });
 
   it("rotates the peer session on restart and rejects signals from an earlier epoch", async () => {
@@ -328,7 +361,7 @@ describe("Durable Object room protocol", () => {
     const left = second.inbox.nextType("left");
     second.socket.send(JSON.stringify({ type: "leave" }));
     expect((await left).type).toBe("left");
-    await peerLeft;
+    expect(await peerLeft).toMatchObject({ reason: "explicit-leave", slotId: expect.any(String) });
     expect((await inspectRoom(first.stub)).room?.slots).toHaveLength(1);
 
     const next = await openRoomSocket(roomId);

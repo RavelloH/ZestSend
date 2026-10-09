@@ -12,6 +12,7 @@
     "build": "tsc -b && vite build",
     "check": "tsc -b",
     "test": "vitest run --config vitest.config.ts --maxWorkers=1 --no-isolate",
+    "test:e2e": "playwright test --config playwright.config.ts",
     "preview": "vite preview",
     "cf-typegen": "wrangler types",
     "deploy": "pnpm run build && wrangler deploy --keep-vars"
@@ -54,6 +55,8 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.51.2",
     "@cloudflare/vitest-plugin": "1.3.6",
+    "@playwright/test": "1.64.0",
+    "@types/node": "^22.20.5",
     "@types/react": "^18.3.24",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^5.1.1",

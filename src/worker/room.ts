@@ -364,6 +364,7 @@ export class Room extends DurableObject<Env> {
         for (const slot of expired) {
           this.broadcastToActive(state, {
             type: "peer-left",
+            reason: "lease-expired",
             epoch: state.epoch,
             slotId: slot.slotId,
             peerId: slot.slotId,
@@ -392,6 +393,7 @@ export class Room extends DurableObject<Env> {
       for (const slot of expired) {
         this.broadcastToActive(state, {
           type: "peer-left",
+          reason: "lease-expired",
           epoch: state.epoch,
           slotId: slot.slotId,
           peerId: slot.slotId,
@@ -565,6 +567,7 @@ export class Room extends DurableObject<Env> {
     this.send(socket, { type: "left", epoch: state.epoch, slotId: slot.slotId });
     this.broadcastToActive(state, {
       type: "peer-left",
+      reason: "explicit-leave",
       epoch: state.epoch,
       slotId: slot.slotId,
       peerId: slot.slotId,
